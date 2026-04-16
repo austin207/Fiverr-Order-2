@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/austi/OneDrive/Desktop/career/Fiver/ROS 2/Freelance potential order 2/**)",
+      "Bash(unzip -l navigation.zip)",
+      "Bash(unzip navigation.zip)",
+      "Bash(git lfs *)"
+    ]
+  }
+}
