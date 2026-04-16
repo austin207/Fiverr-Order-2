@@ -1,0 +1,21 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 30
+    use_sim_time: true
+
+    joint_brod:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    cmd_vel_controller:
+      type: forklift_control/CmdVelController
+
+    # These can stay if you're testing individual joints
+    # steering_controller:
+    #   type: joint_trajectory_controller/JointTrajectoryController
+    #   joints: [steering_joint]
+    #   goal_time: 0.1
+
+    # drive_controller:
+    #   type: velocity_controllers/JointVelocityController
+    #   joint: drive_joint
+    #   velocity: 10.0

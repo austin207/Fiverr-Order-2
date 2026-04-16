@@ -1,0 +1,12 @@
+<!DOCTYPE MeshLabDocument>
+<MeshLabProject>
+ <MeshGroup>
+  <MLMesh label="kina_body_1_1.stl" idInFile="-1" filename="kina_body_1_1.stl" visible="1">
+   <MLMatrix44>
+1 0 0 -933.603 0 1 0 -139.175 0 0 1 -204.378 0 0 0 1 
+</MLMatrix44>
+   <RenderingOption solidColor="192 192 192 255" boxColor="234 234 234 255" pointSize="3" pointColor="252 233 79 255" wireColor="64 64 64 255" wireWidth="1">100001000000000000000100000001010101000010100000000100111011100000001001</RenderingOption>
+  </MLMesh>
+ </MeshGroup>
+ <RasterGroup/>
+</MeshLabProject>

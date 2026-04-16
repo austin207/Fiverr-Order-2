@@ -1,0 +1,9 @@
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    cmd_vel_controller:
+      type: forklift_control/CmdVelController
+     
+    joint_broad:
+      type: joint_state_broadcaster/JointStateBroadcaster

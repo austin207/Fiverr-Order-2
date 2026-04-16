@@ -30,7 +30,7 @@ Metric Collection Methods:
 import rclpy
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path
 from std_msgs.msg import Float32MultiArray 
 import pandas as pd
@@ -60,8 +60,13 @@ class MasterBenchmarker(Node):
         self.initialpose_pub = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
         self.plan_received = False
-        
-        
+
+        # Battery drain state
+        self.current_battery_drain = 0.0
+        self.last_cmd_vel_time = None
+        self.drain_constant = 0.01
+        self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_callback, 10)
+
         # File paths
         self.manifest_path = "dataset/gazebo_worlds/calibration_manifest.csv"
         self.results_path = "dataset/ann_real_world_targets.csv"
@@ -101,6 +106,15 @@ class MasterBenchmarker(Node):
             self.current_mem = float(msg.data[0])
             self.current_plan_time = float(msg.data[1])
             self.current_plan_success = bool(msg.data[2]) if len(msg.data) >= 3 else True
+
+    def cmd_vel_callback(self, msg):
+        """Integrates linear velocity over time to estimate battery drain per run."""
+        now = time.time()
+        if self.last_cmd_vel_time is not None:
+            dt = now - self.last_cmd_vel_time
+            linear_velocity = abs(msg.linear.x)
+            self.current_battery_drain += linear_velocity * dt * self.drain_constant
+        self.last_cmd_vel_time = now
 
     def toggle_astar_param(self, use_astar: bool):
         """Dynamically switches NavFn between A* and Dijkstra via command line."""
@@ -152,6 +166,8 @@ class MasterBenchmarker(Node):
         self.current_turns = 0
         self.plan_received = False
         self.current_plan_success = True
+        self.current_battery_drain = 0.0
+        self.last_cmd_vel_time = None
 
         # 1. Create a precise Start Pose
         start_pose = PoseStamped()
@@ -175,6 +191,7 @@ class MasterBenchmarker(Node):
         self.navigator.followPath(path)
         
         while not self.navigator.isTaskComplete():
+            rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(0.1)
 
         exec_time = time.time() - motion_start
@@ -187,6 +204,7 @@ class MasterBenchmarker(Node):
                 "PlanTime": self.current_plan_time,
                 "ExecTime": exec_time,
                 "Turns": self.current_turns,
+                "BatteryDrain": self.current_battery_drain,
                 "Success": True
             }
         else:
@@ -215,7 +233,7 @@ class MasterBenchmarker(Node):
             
             self.get_logger().info("Waiting 15 seconds for simulation to stabilize...")
             time.sleep(60) 
-            self.navigator.waitUntilNav2Active(localizer='bt_navigator')
+            self.navigator.waitUntilNav2Active(localizer='amcl')
 
             # 2. Setup Goal Pose
             def make_goal_pose():
@@ -241,9 +259,9 @@ class MasterBenchmarker(Node):
             self.toggle_astar_param(use_astar=False)
             res_d = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBased")
             if res_d["Success"]:
-                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"]})
+                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
             else:
-                row_data.update({"D_Mem": np.nan, "D_Cost": np.nan, "D_PlanTime": np.nan, "D_ExecTime": np.nan, "D_Turns": np.nan})
+                row_data.update({"D_Mem": np.nan, "D_Cost": np.nan, "D_PlanTime": np.nan, "D_ExecTime": np.nan, "D_Turns": np.nan, "D_Battery": np.nan})
             self.reset_robot_to_start(row['spawn_x'], row['spawn_y'],world_name)
             # ==========================================
             # RUN 2: A* (A-STAR)
@@ -252,15 +270,15 @@ class MasterBenchmarker(Node):
             self.toggle_astar_param(use_astar=True)
             res_a = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBased")
             if res_a["Success"]:
-                row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"]})
+                row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
             else:
-                row_data.update({"A_Mem": np.nan, "A_Cost": np.nan, "A_PlanTime": np.nan, "A_ExecTime": np.nan, "A_Turns": np.nan})
+                row_data.update({"A_Mem": np.nan, "A_Cost": np.nan, "A_PlanTime": np.nan, "A_ExecTime": np.nan, "A_Turns": np.nan, "A_Battery": np.nan})
             self.reset_robot_to_start(row['spawn_x'], row['spawn_y'], world_name)
             # ==========================================
             # RUN 3: RRT* (20 Iterations)
             # ==========================================
             self.get_logger().info("--- Running RRT* (20 Iterations) ---")
-            rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": []}
+            rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
             
             for i in range(20):
                 self.get_logger().info(f"  > RRT Iteration {i+1}/20...")
@@ -277,11 +295,12 @@ class MasterBenchmarker(Node):
                     "RRT_Cost": np.mean(rrt_metrics["Cost"]),
                     "RRT_PlanTime": np.mean(rrt_metrics["PlanTime"]),
                     "RRT_ExecTime": np.mean(rrt_metrics["ExecTime"]),
-                    "RRT_Turns": np.mean(rrt_metrics["Turns"])
+                    "RRT_Turns": np.mean(rrt_metrics["Turns"]),
+                    "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
                 })
             else:
                 self.get_logger().warn("RRT* failed all 20 attempts!")
-                row_data.update({"RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan})
+                row_data.update({"RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": np.nan})
 
             # Save to results
             final_results.append(row_data)

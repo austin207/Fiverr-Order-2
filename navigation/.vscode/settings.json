@@ -1,0 +1,17 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/forkLift/build/py_trees_ros_tutorials",
+        "/home/sac/projects/fiverr/forkLift/install/py_trees_ros_tutorials/lib/python3.10/site-packages",
+        "/forkLift/build/mob_controller",
+        "/home/sac/projects/fiverr/forkLift/install/mob_controller/lib/python3.10/site-packages",
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/forkLift/build/py_trees_ros_tutorials",
+        "/home/sac/projects/fiverr/forkLift/install/py_trees_ros_tutorials/lib/python3.10/site-packages",
+        "/forkLift/build/mob_controller",
+        "/home/sac/projects/fiverr/forkLift/install/mob_controller/lib/python3.10/site-packages",
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "cmake.sourceDirectory": "/home/sac/projects/fiverr/forkLift/src/robot_bringup"
+}
