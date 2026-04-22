@@ -28,6 +28,7 @@ Metric Collection Methods:
 
 
 import rclpy
+import rclpy.time
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Twist
@@ -46,6 +47,7 @@ class MasterBenchmarker(Node):
     def __init__(self):
         super().__init__('master_benchmarker')
         self.navigator = BasicNavigator()
+        self.rrt_iterations = int(os.getenv('RRT_ITERATIONS', '20'))
         
         # Subscriptions to capture C++ metrics and Path Cost
         self.path_sub = self.create_subscription(Path, '/plan', self.path_callback, 10)
@@ -116,16 +118,6 @@ class MasterBenchmarker(Node):
             self.current_battery_drain += linear_velocity * dt * self.drain_constant
         self.last_cmd_vel_time = now
 
-    def toggle_astar_param(self, use_astar: bool):
-        """Dynamically switches NavFn between A* and Dijkstra via command line."""
-        val = "true" if use_astar else "false"
-        self.get_logger().info(f"Setting GridBased.use_astar to {val}...")
-        # Note: Adjust '/planner_server' and 'GridBased' if your node/plugin names are different
-        subprocess.run(
-            ['ros2', 'param', 'set', '/planner_server', 'GridBased.use_astar', val],
-            stdout=subprocess.DEVNULL
-        )
-        time.sleep(1.0) # Give Nav2 a moment to process the parameter change
     def reset_robot_to_start(self, spawn_x, spawn_y, world_name):
         """Teleport robot physically in Gazebo Harmonic/Fortress AND reset AMCL."""
         self.get_logger().info(f"Teleporting robot back to {spawn_x}, {spawn_y}...")
@@ -133,7 +125,7 @@ class MasterBenchmarker(Node):
         # 1. Reset AMCL (The Brain)
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = 'map'
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = rclpy.time.Time().to_msg()  # zero = use latest TF
         msg.pose.pose.position.x = float(spawn_x)
         msg.pose.pose.position.y = float(spawn_y)
         msg.pose.pose.orientation.w = 1.0
@@ -183,7 +175,16 @@ class MasterBenchmarker(Node):
         
         if not path:
             self.get_logger().warn(f"{planner_id} failed to find a path!")
-            return {"Success": False}
+            return {
+                "Mem": self.current_mem,
+                "Cost": self.current_path_cost,
+                "PlanTime": self.current_plan_time,
+                "ExecTime": 0.0,
+                "Turns": self.current_turns,
+                "BatteryDrain": self.current_battery_drain,
+                "Success": False,
+                "PathFound": False
+            }
             
         # 3. Tell the robot to drive along that exact path (ISOLATED EXECUTION)
         self.get_logger().info("Path found! Driving to goal...")
@@ -205,10 +206,20 @@ class MasterBenchmarker(Node):
                 "ExecTime": exec_time,
                 "Turns": self.current_turns,
                 "BatteryDrain": self.current_battery_drain,
-                "Success": True
+                "Success": True,
+                "PathFound": True
             }
         else:
-            return {"Success": False}
+            return {
+                "Mem": self.current_mem,
+                "Cost": self.current_path_cost,
+                "PlanTime": self.current_plan_time,
+                "ExecTime": exec_time,
+                "Turns": self.current_turns,
+                "BatteryDrain": self.current_battery_drain,
+                "Success": False,
+                "PathFound": True
+            }
 
     def run_benchmark(self):
         df = pd.read_csv(self.manifest_path)
@@ -256,35 +267,27 @@ class MasterBenchmarker(Node):
             # RUN 1: DIJKSTRA
             # ==========================================
             self.get_logger().info("--- Running Dijkstra ---")
-            self.toggle_astar_param(use_astar=False)
             res_d = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBased")
-            if res_d["Success"]:
-                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
-            else:
-                row_data.update({"D_Mem": np.nan, "D_Cost": np.nan, "D_PlanTime": np.nan, "D_ExecTime": np.nan, "D_Turns": np.nan, "D_Battery": np.nan})
+            row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
             self.reset_robot_to_start(row['spawn_x'], row['spawn_y'],world_name)
             # ==========================================
             # RUN 2: A* (A-STAR)
             # ==========================================
             self.get_logger().info("--- Running A* ---")
-            self.toggle_astar_param(use_astar=True)
-            res_a = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBased")
-            if res_a["Success"]:
-                row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
-            else:
-                row_data.update({"A_Mem": np.nan, "A_Cost": np.nan, "A_PlanTime": np.nan, "A_ExecTime": np.nan, "A_Turns": np.nan, "A_Battery": np.nan})
+            res_a = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBasedAstar")
+            row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
             self.reset_robot_to_start(row['spawn_x'], row['spawn_y'], world_name)
             # ==========================================
             # RUN 3: RRT* (20 Iterations)
             # ==========================================
-            self.get_logger().info("--- Running RRT* (20 Iterations) ---")
+            self.get_logger().info(f"--- Running RRT* ({self.rrt_iterations} Iterations) ---")
             rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
             
-            for i in range(20):
-                self.get_logger().info(f"  > RRT Iteration {i+1}/20...")
+            for i in range(self.rrt_iterations):
+                self.get_logger().info(f"  > RRT Iteration {i+1}/{self.rrt_iterations}...")
                 self.reset_robot_to_start(row['spawn_x'], row['spawn_y'], world_name)
                 res_rrt = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="RRTStar")
-                if res_rrt["Success"]:
+                if res_rrt.get("PathFound", False):
                     for key in rrt_metrics.keys():
                         rrt_metrics[key].append(res_rrt[key])
             
@@ -299,7 +302,7 @@ class MasterBenchmarker(Node):
                     "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
                 })
             else:
-                self.get_logger().warn("RRT* failed all 20 attempts!")
+                self.get_logger().warn(f"RRT* failed all {self.rrt_iterations} attempts!")
                 row_data.update({"RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": np.nan})
 
             # Save to results
