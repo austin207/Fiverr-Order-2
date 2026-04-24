@@ -27,6 +27,7 @@ Metric Collection Methods:
 """
 
 
+import copy
 import rclpy
 import rclpy.time
 from rclpy.node import Node
@@ -148,11 +149,18 @@ class MasterBenchmarker(Node):
         if result.returncode != 0:
             self.get_logger().warn(f"ign teleport failed: {result.stderr.strip()}")
         
-        # Give physics and costmaps 2 seconds to settle
-        time.sleep(2.0)
-        
+        # Give physics and costmaps 2 seconds to settle, processing callbacks so
+        # AMCL ingests the /initialpose we just published.
+        for _ in range(40):
+            rclpy.spin_once(self, timeout_sec=0.05)
+
         # Clear costmaps so old laser scans from the goal don't block the start
         self.navigator.clearAllCostmaps()
+
+        # Spin for 1 s after clearing so the static layer repopulates before
+        # the next getPath call — prevents the global costmap being empty.
+        for _ in range(20):
+            rclpy.spin_once(self, timeout_sec=0.05)
     def execute_single_run(self, spawn_x, spawn_y, goal_pose, planner_id):
         """Executes a single navigation attempt and returns the 5 metrics."""
         # Reset state BEFORE sending goal to avoid stale callback data
@@ -164,6 +172,11 @@ class MasterBenchmarker(Node):
         self.current_plan_success = True
         self.current_battery_drain = 0.0
         self.last_cmd_vel_time = None
+
+        # Drain any pending callbacks left over from the previous run so stale
+        # action-server state doesn't corrupt the next goal (fixes 0-poses bug).
+        for _ in range(20):
+            rclpy.spin_once(self, timeout_sec=0.0)
 
         # 1. Create a precise Start Pose
         start_pose = PoseStamped()
@@ -193,9 +206,11 @@ class MasterBenchmarker(Node):
         self.get_logger().info(f"GETPATH SUCCESS for planner {planner_id}, poses={len(path.poses)}")
 
         # 3. Tell the robot to drive along that exact path (ISOLATED EXECUTION)
+        # Deep-copy avoids the action-result-future GC bug where the C++ backing
+        # buffer can be freed between getPath() and followPath(), sending 0 poses.
         self.get_logger().info("Path found! Driving to goal...")
         motion_start = time.time()
-        self.navigator.followPath(path)
+        self.navigator.followPath(copy.deepcopy(path))
         
         while not self.navigator.isTaskComplete():
             if self.single_run_timeout_sec > 0 and (time.time() - motion_start) > self.single_run_timeout_sec:
