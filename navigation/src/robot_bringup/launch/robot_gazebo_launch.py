@@ -23,16 +23,24 @@ def _create_static_tf_node(context, *args, **kwargs):
         name='map_to_odom_tf',
         arguments=[spawn_x, spawn_y, '0', '0', '0', '0', 'map', 'odom'],
         output='screen',
+        parameters=[{'use_sim_time': True}],
     )]
 
 
 def _create_amcl_node(context, *args, **kwargs):
     """Create AMCL with the map-specific spawn position as the initial pose.
 
-    Without AMCL, map->odom is a static TF that never updates. After each
-    teleport back to spawn, the robot's odom position is still at the goal
-    (~33m away), so MPPI prunes the entire global path as out-of-costmap.
-    AMCL dynamically corrects map->odom after teleport + /initialpose.
+    AMCL provides the dynamic map->odom TF.  After each teleport back to spawn,
+    the robot's odom frame has drifted (accumulated from navigation), so AMCL
+    must recompute map->odom to place the robot correctly in the map frame.
+    Without this, MPPI sees the path start >5m away and prunes everything → "0 poses".
+
+    Parameter names use ROS2 AMCL's dot-notation (initial_pose.x, not initial_pose_x).
+    Using underscores is silently ignored and AMCL defaults to (0,0,0).
+
+    The static_transform_publisher for map->odom is NOT included in the launch
+    because it conflicts: static TF stays in the TF2 buffer and can override AMCL's
+    dynamic map->odom updates after teleport.
     """
     spawn_x = float(LaunchConfiguration('spawn_x').perform(context))
     spawn_y = float(LaunchConfiguration('spawn_y').perform(context))
@@ -47,10 +55,10 @@ def _create_amcl_node(context, *args, **kwargs):
         parameters=[nav2_params_path,
                     {'use_sim_time': True,
                      'set_initial_pose': True,
-                     'initial_pose_x': spawn_x,
-                     'initial_pose_y': spawn_y,
-                     'initial_pose_z': 0.0,
-                     'initial_pose_yaw': 0.0}],
+                     'initial_pose.x': spawn_x,
+                     'initial_pose.y': spawn_y,
+                     'initial_pose.z': 0.0,
+                     'initial_pose.yaw': 0.0}],
     )]
 
 
@@ -168,7 +176,6 @@ def generate_launch_description():
         ros_gz_bridge,
         spawn_robot,
         map_server,
-        OpaqueFunction(function=_create_static_tf_node),
         OpaqueFunction(function=_create_amcl_node),
         localization_lifecycle,
         rviz2_node,

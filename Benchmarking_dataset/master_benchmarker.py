@@ -30,11 +30,14 @@ Metric Collection Methods:
 import copy
 import rclpy
 import rclpy.time
+import rclpy.parameter
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path
-from std_msgs.msg import Float32MultiArray 
+from std_msgs.msg import Float32MultiArray
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
 import pandas as pd
 import numpy as np
 import subprocess
@@ -73,6 +76,18 @@ class MasterBenchmarker(Node):
         self.last_cmd_vel_time = None
         self.drain_constant = 0.01
         self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_callback, 10)
+
+        # TF2 buffer for diagnostics
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # Static TF broadcaster for map→odom.
+        # AMCL's tf_broadcast is disabled so it cannot override this with a wrong value.
+        # Static transforms are valid at ALL times (no timestamp/extrapolation issues).
+        # We publish the correction right at startup (spawn = odom origin) and update it
+        # after each teleport so MPPI always sees the robot at the correct map position.
+        self.static_tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        self._correction_spawn_x = None
+        self._correction_spawn_y = None
 
         # File paths
         self.manifest_path = "dataset/gazebo_worlds/calibration_manifest.csv"
@@ -129,52 +144,88 @@ class MasterBenchmarker(Node):
         while time.time() < t_end:
             rclpy.spin_once(self, timeout_sec=0.05)
 
+
+    def _update_map_odom_static_tf(self, spawn_x, spawn_y):
+        """Publish the corrected map→odom as a STATIC transform.
+
+        Static transforms are valid at ALL times in TF2 — no timestamps, no extrapolation
+        limits. This sidesteps every 'extrapolation into the future/past' error that
+        arises from sim_time vs wall-clock mismatches when using dynamic TF.
+
+        After the robot navigates ~33 m to the goal, odom drifts far from the origin.
+        The old static TF (map→odom = spawn offset) is wrong. This method:
+            1. Reads the robot's current position in odom
+            2. Computes: T_map_odom = spawn - T_odom_robot
+            3. Re-publishes it as a static TF (overwriting the old static value)
+
+        AMCL's tf_broadcast is disabled so it cannot override this with a stale value.
+        """
+        try:
+            t = self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())
+            odom_x = t.transform.translation.x
+            odom_y = t.transform.translation.y
+        except Exception as e:
+            self.get_logger().warn(f"[TF-CORRECT] Could not read odom pose: {e}")
+            return
+
+        correction_x = float(spawn_x) - odom_x
+        correction_y = float(spawn_y) - odom_y
+
+        ts = TransformStamped()
+        ts.header.stamp = rclpy.time.Time().to_msg()  # time=0 → valid at all times
+        ts.header.frame_id = 'map'
+        ts.child_frame_id = 'odom'
+        ts.transform.translation.x = correction_x
+        ts.transform.translation.y = correction_y
+        ts.transform.translation.z = 0.0
+        ts.transform.rotation.w = 1.0
+        ts.transform.rotation.x = 0.0
+        ts.transform.rotation.y = 0.0
+        ts.transform.rotation.z = 0.0
+        self.static_tf_broadcaster.sendTransform(ts)
+
+        self.get_logger().info(
+            f"[TF-CORRECT] static map→odom = ({correction_x:.3f}, {correction_y:.3f}) "
+            f"[robot_odom=({odom_x:.3f}, {odom_y:.3f})]")
+
     def reset_robot_to_start(self, spawn_x, spawn_y, world_name):
-        """Teleport robot physically in Gazebo Harmonic/Fortress AND reset AMCL."""
+        """Teleport robot in Gazebo, then correct map→odom so MPPI finds the path."""
         self.get_logger().info(f"Teleporting robot back to {spawn_x}, {spawn_y}...")
 
-        # 1. Teleport Gazebo Model FIRST so the diff-drive odometry resets to the
-        #    new position before AMCL is told where the robot is in map frame.
-        #    Publishing /initialpose BEFORE teleport causes AMCL to compute
-        #    map→odom using the pre-teleport (goal-position) odom, leaving the
-        #    robot TF at the goal. With recovery_alpha=0.0 AMCL never self-corrects,
-        #    so MPPI prunes the entire global path out-of-costmap → "0 poses" error.
         ign_cmd = [
             "ign", "service", "-s", f"/world/{world_name}/set_pose",
             "--reqtype", "ignition.msgs.Pose",
             "--reptype", "ignition.msgs.Boolean",
             "--timeout", "2000",
-            "--req", f'name: "robot", position: {{x: {spawn_x}, y: {spawn_y}, z: 0.1}}, orientation: {{w: 1.0, x: 0.0, y: 0.0, z: 0.0}}'
+            "--req", f'name: "robot", position: {{x: {spawn_x}, y: {spawn_y}, z: 0.1}}, '
+                     f'orientation: {{w: 1.0, x: 0.0, y: 0.0, z: 0.0}}'
         ]
         result = subprocess.run(ign_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             self.get_logger().warn(f"ign teleport failed: {result.stderr.strip()}")
 
-        # 2. Let Gazebo physics and diff-drive odometry settle at the new position.
-        #    Must be a real wall-clock wait — spin_once loops drain instantly when
-        #    the callback queue is full, so count-based loops don't guarantee time.
+        # Let Gazebo physics settle and odom stabilise at the new physical position.
         self._spin_for(1.0)
 
-        # 3. Now reset AMCL — it reads the current (post-teleport) odom frame
-        #    and correctly localizes the robot in map frame.
+        # Recompute and re-publish the static map→odom transform.
+        # Static TF is valid at all times so there are no timestamp/extrapolation issues.
+        self._update_map_odom_static_tf(spawn_x, spawn_y)
+        self._spin_for(1.0)
+
+        # Tell AMCL the new pose so its particle filter stays calibrated.
+        # (AMCL's tf_broadcast is disabled, so this doesn't affect map→odom TF.)
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = 'map'
-        msg.header.stamp = rclpy.time.Time().to_msg()  # zero = use latest TF
+        msg.header.stamp = rclpy.time.Time().to_msg()
         msg.pose.pose.position.x = float(spawn_x)
         msg.pose.pose.position.y = float(spawn_y)
         msg.pose.pose.orientation.w = 1.0
         self.initialpose_pub.publish(msg)
-
-        # 4. AMCL must receive /initialpose, process it, ingest multiple laser scans
-        #    (10 Hz), and publish the updated map→odom TF before MPPI is called.
-        #    3 seconds = 30 laser scans — sufficient for AMCL to converge.
-        self._spin_for(3.0)
-
-        # Clear costmaps so stale obstacle cells from the goal don't block the start.
-        self.navigator.clearAllCostmaps()
-
-        # Let the static layer repopulate the global costmap before getPath.
         self._spin_for(1.0)
+
+        # Clear costmaps so stale obstacle cells from the previous run don't block.
+        self.navigator.clearAllCostmaps()
+        self._spin_for(0.5)
     def execute_single_run(self, spawn_x, spawn_y, goal_pose, planner_id):
         """Executes a single navigation attempt and returns the 5 metrics."""
         # Reset state BEFORE sending goal to avoid stale callback data
@@ -219,7 +270,25 @@ class MasterBenchmarker(Node):
 
         self.get_logger().info(f"GETPATH SUCCESS for planner {planner_id}, poses={len(path.poses)}")
 
-        # 3. Tell the robot to drive along that exact path (ISOLATED EXECUTION)
+        # 3. Log TF state so we can verify AMCL has updated map→odom after teleport.
+        try:
+            t_mo = self.tf_buffer.lookup_transform('map', 'odom', rclpy.time.Time())
+            mo_x = t_mo.transform.translation.x
+            mo_y = t_mo.transform.translation.y
+            self.get_logger().info(
+                f"[TF-DIAG] map→odom before followPath: tx={mo_x:.3f} ty={mo_y:.3f}")
+        except Exception as tf_err:
+            self.get_logger().warn(f"[TF-DIAG] map→odom lookup failed: {tf_err}")
+        try:
+            t_rob = self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())
+            rob_x = t_rob.transform.translation.x
+            rob_y = t_rob.transform.translation.y
+            self.get_logger().info(
+                f"[TF-DIAG] base_footprint in odom: x={rob_x:.3f} y={rob_y:.3f}")
+        except Exception as tf_err:
+            self.get_logger().warn(f"[TF-DIAG] odom→base_footprint lookup failed: {tf_err}")
+
+        # 4. Tell the robot to drive along that exact path (ISOLATED EXECUTION)
         # Deep-copy avoids the action-result-future GC bug where the C++ backing
         # buffer can be freed between getPath() and followPath(), sending 0 poses.
         self.get_logger().info("Path found! Driving to goal...")
@@ -339,6 +408,22 @@ class MasterBenchmarker(Node):
                     "gz_args:=-r -s --headless-rendering"
                 ]
                 process = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
+
+                # Publish initial static map→odom immediately so Nav2 nodes can
+                # configure their costmaps as soon as they start.  At startup the robot
+                # is at the spawn position and odom origin is (0,0), so the correction
+                # is simply (spawn_x, spawn_y).  No odom lookup needed here.
+                ts0 = TransformStamped()
+                ts0.header.stamp = rclpy.time.Time().to_msg()
+                ts0.header.frame_id = 'map'
+                ts0.child_frame_id = 'odom'
+                ts0.transform.translation.x = float(spawn_x)
+                ts0.transform.translation.y = float(spawn_y)
+                ts0.transform.translation.z = 0.0
+                ts0.transform.rotation.w = 1.0
+                self.static_tf_broadcaster.sendTransform(ts0)
+                self.get_logger().info(
+                    f"[TF-CORRECT] initial static map→odom = ({spawn_x}, {spawn_y})")
 
                 self.get_logger().info("Waiting for simulation to stabilize...")
                 time.sleep(60)
