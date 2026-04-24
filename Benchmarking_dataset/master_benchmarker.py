@@ -123,17 +123,22 @@ class MasterBenchmarker(Node):
             self.current_battery_drain += linear_velocity * dt * self.drain_constant
         self.last_cmd_vel_time = now
 
+    def _spin_for(self, seconds):
+        """Spin this node for exactly `seconds` wall-clock time, processing callbacks."""
+        t_end = time.time() + seconds
+        while time.time() < t_end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
     def reset_robot_to_start(self, spawn_x, spawn_y, world_name):
         """Teleport robot physically in Gazebo Harmonic/Fortress AND reset AMCL."""
         self.get_logger().info(f"Teleporting robot back to {spawn_x}, {spawn_y}...")
 
         # 1. Teleport Gazebo Model FIRST so the diff-drive odometry resets to the
         #    new position before AMCL is told where the robot is in map frame.
-        #    If we publish /initialpose first, AMCL computes map→odom using the
-        #    pre-teleport (goal-position) odom, which puts AMCL's particles at the
-        #    wrong location after the teleport. With recovery_alpha_fast/slow=0.0
-        #    AMCL never self-corrects, so MPPI prunes the entire global path as
-        #    out-of-costmap and returns 0 poses.
+        #    Publishing /initialpose BEFORE teleport causes AMCL to compute
+        #    map→odom using the pre-teleport (goal-position) odom, leaving the
+        #    robot TF at the goal. With recovery_alpha=0.0 AMCL never self-corrects,
+        #    so MPPI prunes the entire global path out-of-costmap → "0 poses" error.
         ign_cmd = [
             "ign", "service", "-s", f"/world/{world_name}/set_pose",
             "--reqtype", "ignition.msgs.Pose",
@@ -145,10 +150,10 @@ class MasterBenchmarker(Node):
         if result.returncode != 0:
             self.get_logger().warn(f"ign teleport failed: {result.stderr.strip()}")
 
-        # 2. Wait for physics and odometry to settle at the new position before
-        #    publishing /initialpose.
-        for _ in range(20):
-            rclpy.spin_once(self, timeout_sec=0.05)
+        # 2. Let Gazebo physics and diff-drive odometry settle at the new position.
+        #    Must be a real wall-clock wait — spin_once loops drain instantly when
+        #    the callback queue is full, so count-based loops don't guarantee time.
+        self._spin_for(1.0)
 
         # 3. Now reset AMCL — it reads the current (post-teleport) odom frame
         #    and correctly localizes the robot in map frame.
@@ -160,17 +165,16 @@ class MasterBenchmarker(Node):
         msg.pose.pose.orientation.w = 1.0
         self.initialpose_pub.publish(msg)
 
-        # 4. Give AMCL time to process /initialpose and update the map→odom TF.
-        for _ in range(40):
-            rclpy.spin_once(self, timeout_sec=0.05)
+        # 4. AMCL must receive /initialpose, process it, ingest multiple laser scans
+        #    (10 Hz), and publish the updated map→odom TF before MPPI is called.
+        #    3 seconds = 30 laser scans — sufficient for AMCL to converge.
+        self._spin_for(3.0)
 
-        # Clear costmaps so old laser scans from the goal don't block the start
+        # Clear costmaps so stale obstacle cells from the goal don't block the start.
         self.navigator.clearAllCostmaps()
 
-        # Spin for 1 s after clearing so the static layer repopulates before
-        # the next getPath call — prevents the global costmap being empty.
-        for _ in range(20):
-            rclpy.spin_once(self, timeout_sec=0.05)
+        # Let the static layer repopulate the global costmap before getPath.
+        self._spin_for(1.0)
     def execute_single_run(self, spawn_x, spawn_y, goal_pose, planner_id):
         """Executes a single navigation attempt and returns the 5 metrics."""
         # Reset state BEFORE sending goal to avoid stale callback data
