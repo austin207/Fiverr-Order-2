@@ -25,9 +25,11 @@ void RRTStar::configure(
   tf_ = tf;
   costmap_ = costmap_ros->getCostmap();
   global_frame_ = costmap_ros->getGlobalFrameID();
-  max_iterations_ = 1000;
-
   // Parameter initialization
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name_ + ".max_iterations", rclcpp::ParameterValue(1000));
+  node_->get_parameter(name_ + ".max_iterations", max_iterations_);
+
   nav2_util::declare_parameter_if_not_declared(
     node_, name_ + ".interpolation_resolution", rclcpp::ParameterValue(0.01));
   node_->get_parameter(name_ + ".interpolation_resolution", interpolation_resolution_);
@@ -125,7 +127,7 @@ bool RRTStar::connectible(const Vertex& start, const Vertex& end) {
       for (int i = 0; i < steps; ++i) {
           unsigned int mx, my;
           if (!costmap_->worldToMap(x, y, mx, my)) return false;
-          if (costmap_->getCost(mx, my) != nav2_costmap_2d::FREE_SPACE) return false;
+          if (costmap_->getCost(mx, my) >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE) return false;
           x += x_increment;
           y += y_increment;
       }

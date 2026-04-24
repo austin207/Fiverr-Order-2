@@ -126,17 +126,14 @@ class MasterBenchmarker(Node):
     def reset_robot_to_start(self, spawn_x, spawn_y, world_name):
         """Teleport robot physically in Gazebo Harmonic/Fortress AND reset AMCL."""
         self.get_logger().info(f"Teleporting robot back to {spawn_x}, {spawn_y}...")
-        
-        # 1. Reset AMCL (The Brain)
-        msg = PoseWithCovarianceStamped()
-        msg.header.frame_id = 'map'
-        msg.header.stamp = rclpy.time.Time().to_msg()  # zero = use latest TF
-        msg.pose.pose.position.x = float(spawn_x)
-        msg.pose.pose.position.y = float(spawn_y)
-        msg.pose.pose.orientation.w = 1.0
-        self.initialpose_pub.publish(msg)
-        
-        # 2. Teleport Gazebo Model using Ignition Fortress CLI
+
+        # 1. Teleport Gazebo Model FIRST so the diff-drive odometry resets to the
+        #    new position before AMCL is told where the robot is in map frame.
+        #    If we publish /initialpose first, AMCL computes map→odom using the
+        #    pre-teleport (goal-position) odom, which puts AMCL's particles at the
+        #    wrong location after the teleport. With recovery_alpha_fast/slow=0.0
+        #    AMCL never self-corrects, so MPPI prunes the entire global path as
+        #    out-of-costmap and returns 0 poses.
         ign_cmd = [
             "ign", "service", "-s", f"/world/{world_name}/set_pose",
             "--reqtype", "ignition.msgs.Pose",
@@ -144,13 +141,26 @@ class MasterBenchmarker(Node):
             "--timeout", "2000",
             "--req", f'name: "robot", position: {{x: {spawn_x}, y: {spawn_y}, z: 0.1}}, orientation: {{w: 1.0, x: 0.0, y: 0.0, z: 0.0}}'
         ]
-        
         result = subprocess.run(ign_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             self.get_logger().warn(f"ign teleport failed: {result.stderr.strip()}")
-        
-        # Give physics and costmaps 2 seconds to settle, processing callbacks so
-        # AMCL ingests the /initialpose we just published.
+
+        # 2. Wait for physics and odometry to settle at the new position before
+        #    publishing /initialpose.
+        for _ in range(20):
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        # 3. Now reset AMCL — it reads the current (post-teleport) odom frame
+        #    and correctly localizes the robot in map frame.
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = rclpy.time.Time().to_msg()  # zero = use latest TF
+        msg.pose.pose.position.x = float(spawn_x)
+        msg.pose.pose.position.y = float(spawn_y)
+        msg.pose.pose.orientation.w = 1.0
+        self.initialpose_pub.publish(msg)
+
+        # 4. Give AMCL time to process /initialpose and update the map→odom TF.
         for _ in range(40):
             rclpy.spin_once(self, timeout_sec=0.05)
 

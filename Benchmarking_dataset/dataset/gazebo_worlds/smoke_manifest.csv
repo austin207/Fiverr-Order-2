@@ -1,0 +1,2 @@
+world_file,category,difficulty,obstacles,a_mem,a_time,a_turns,d_mem,d_time,d_turns,rrt_mem,rrt_time,rrt_turns,spawn_x,spawn_y,spawn_z,goal_x,goal_y,wall_count
+map_59_Random_easy.sdf,Random,Easy,251,47,600.1192,0,2237,22530.1673,0,291,1985.0152,42.0,-11.5,11.0,0.1,11.5,-12.0,251
