@@ -27,12 +27,6 @@
       <wheel_radius>0.084</wheel_radius>
     </plugin>
 
-    <!-- Sensors system -->
-    <plugin filename="ignition-gazebo-sensors-system"
-            name="ignition::gazebo::systems::Sensors">
-      <render_engine>ogre2</render_engine>
-    </plugin>
-
     <!-- Joint State Publisher -->
     <plugin filename="ignition-gazebo-joint-state-publisher-system"
             name="ignition::gazebo::systems::JointStatePublisher"/>
@@ -50,9 +44,9 @@
     </sensor>
   </gazebo>
 
-  <!-- LiDAR Sensor (using gpu_lidar for Fortress) -->
+  <!-- LiDAR Sensor -->
   <gazebo reference="lidar_link">
-    <sensor name="gpu_lidar" type="gpu_lidar">
+    <sensor name="lidar" type="lidar">
       <pose relative_to="lidar_link">0 0 0 0 0 0</pose>
       <topic>lidar</topic>
       <update_rate>10</update_rate>

@@ -22,6 +22,10 @@ source /ros2_ws/install/setup.bash
 echo ">>> Installing Python dependencies"
 pip install --quiet pandas numpy
 
+# ── 3b. Software renderer env vars (Gazebo uses EGL via --headless-rendering) ──
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+
 # ── 4. Truncate manifest to first 10 maps ───────────────────────────────────
 cd /benchmarking
 MANIFEST="dataset/gazebo_worlds/calibration_manifest.csv"

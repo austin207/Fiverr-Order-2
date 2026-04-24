@@ -285,7 +285,7 @@ planner_server:
       plugin: 'nav2_rrtstar_planner/RRTStar'
       max_iterations: 10000
       interpolation_resolution: 0.05
-      goal_tolerance: 3.0
+      goal_tolerance: 5.0
 
 smoother_server:
   ros__parameters:

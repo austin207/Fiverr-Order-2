@@ -39,6 +39,7 @@ import numpy as np
 import subprocess
 import time
 import os
+from lifecycle_msgs.srv import GetState
 import math
 from geometry_msgs.msg import PoseWithCovarianceStamped
 import signal
@@ -48,6 +49,9 @@ class MasterBenchmarker(Node):
         super().__init__('master_benchmarker')
         self.navigator = BasicNavigator()
         self.rrt_iterations = int(os.getenv('RRT_ITERATIONS', '20'))
+        self.single_run_timeout_sec = float(os.getenv('SINGLE_RUN_TIMEOUT_SEC', '0'))
+        self.map_timeout_sec = float(os.getenv('MAP_TIMEOUT_SEC', '0'))
+        self.nav2_active_timeout_sec = float(os.getenv('NAV2_ACTIVE_TIMEOUT_SEC', '0'))
         
         # Subscriptions to capture C++ metrics and Path Cost
         self.path_sub = self.create_subscription(Path, '/plan', self.path_callback, 10)
@@ -174,7 +178,7 @@ class MasterBenchmarker(Node):
         path = self.navigator.getPath(start_pose, goal_pose, planner_id=planner_id, use_start=True)
         
         if not path:
-            self.get_logger().warn(f"{planner_id} failed to find a path!")
+            self.get_logger().warn(f"GETPATH RETURNED NONE for planner {planner_id}")
             return {
                 "Mem": self.current_mem,
                 "Cost": self.current_path_cost,
@@ -185,18 +189,26 @@ class MasterBenchmarker(Node):
                 "Success": False,
                 "PathFound": False
             }
-            
+
+        self.get_logger().info(f"GETPATH SUCCESS for planner {planner_id}, poses={len(path.poses)}")
+
         # 3. Tell the robot to drive along that exact path (ISOLATED EXECUTION)
         self.get_logger().info("Path found! Driving to goal...")
         motion_start = time.time()
         self.navigator.followPath(path)
         
         while not self.navigator.isTaskComplete():
+            if self.single_run_timeout_sec > 0 and (time.time() - motion_start) > self.single_run_timeout_sec:
+                self.get_logger().warn(
+                    f"{planner_id} execution timeout after {self.single_run_timeout_sec:.1f}s. Cancelling task.")
+                self.navigator.cancelTask()
+                break
             rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(0.1)
 
         exec_time = time.time() - motion_start
         result = self.navigator.getResult()
+        self.get_logger().info(f"TaskResult for {planner_id}: {result}")
 
         if result == TaskResult.SUCCEEDED:
             return {
@@ -210,6 +222,8 @@ class MasterBenchmarker(Node):
                 "PathFound": True
             }
         else:
+            self.get_logger().warn(
+                f"{planner_id} followPath did not succeed. TaskResult={result}")
             return {
                 "Mem": self.current_mem,
                 "Cost": self.current_path_cost,
@@ -221,99 +235,191 @@ class MasterBenchmarker(Node):
                 "PathFound": True
             }
 
+    def _node_is_active(self, node_name, timeout_sec=5.0):
+        """Return True if the given lifecycle node is in 'active' state."""
+        client = self.create_client(GetState, f'{node_name}/get_state')
+        deadline = time.time() + timeout_sec
+        while not client.service_is_ready():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if time.time() > deadline:
+                return False
+        future = client.call_async(GetState.Request())
+        deadline2 = time.time() + timeout_sec
+        while not future.done():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if time.time() > deadline2:
+                return False
+        if future.result() and future.result().current_state.label == 'active':
+            return True
+        return False
+
+    def wait_nav2_active_with_timeout(self):
+        timeout = self.nav2_active_timeout_sec if self.nav2_active_timeout_sec > 0 else 120.0
+        deadline = time.time() + timeout
+        nodes_needed = ['map_server', 'bt_navigator']
+        active = set()
+
+        self.get_logger().info(f"Waiting for Nav2 nodes: {nodes_needed}")
+        while active < set(nodes_needed):
+            if time.time() > deadline:
+                self.get_logger().warn(
+                    f"Nav2 activation timeout after {timeout:.1f}s. Active: {active}")
+                return False
+            rclpy.spin_once(self, timeout_sec=0.1)
+            for n in nodes_needed:
+                if n not in active and self._node_is_active(n, timeout_sec=2.0):
+                    active.add(n)
+                    self.get_logger().info(f"{n} is active")
+
+        self.get_logger().info("All Nav2 nodes active")
+        return True
+
     def run_benchmark(self):
         df = pd.read_csv(self.manifest_path)
         final_results = []
 
         for index, row in df.iterrows():
             world_file = os.path.join(self.worlds_dir, row['world_file'])
-            self.get_logger().info(f"\n{'='*50}\nTesting Map {index+1}/{len(df)}: {row['world_file']}\n{'='*50}")
+            spawn_x = float(row['spawn_x'])
+            spawn_y = float(row['spawn_y'])
+            goal_x = float(row['goal_x'])
+            goal_y = float(row['goal_y'])
 
-            
-            # 1. Launch Gazebo & Nav2
-            launch_cmd = [
-                "ros2", "launch", "robot_bringup", "robot_gazebo_launch.py",
-                f"world:={world_file}",
-                f"spawn_x:={row['spawn_x']}", f"spawn_y:={row['spawn_y']}",
-                "use_rviz:=false", 
-                "rviz:=false",        
-                "headless:=true",     
-                "gz_args:=-r -s"  
-            ]
-            process = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
-            
-            self.get_logger().info("Waiting 15 seconds for simulation to stabilize...")
-            time.sleep(60) 
-            self.navigator.waitUntilNav2Active(localizer='amcl')
+            self.get_logger().info(f"\n{'='*50}\nTesting Map {index+1}/{len(df)}: {row['world_file']}\n"
+                                   f"Manifest spawn=({spawn_x:.2f}, {spawn_y:.2f}) goal=({goal_x:.2f}, {goal_y:.2f})\n"
+                                   f"{'='*50}")
 
-            # 2. Setup Goal Pose
-            def make_goal_pose():
-                gp = PoseStamped()
-                gp.header.frame_id = 'map'
-                gp.header.stamp = self.navigator.get_clock().now().to_msg()
-                gp.pose.position.x = float(row['goal_x'])
-                gp.pose.position.y = float(row['goal_y'])
-                gp.pose.orientation.w = 1.0
-                return gp 
+            row_data = {
+                "world_file": row['world_file'],
+                "D_Mem": np.nan, "D_Cost": np.nan, "D_PlanTime": np.nan, "D_ExecTime": np.nan, "D_Turns": np.nan, "D_Battery": np.nan,
+                "A_Mem": np.nan, "A_Cost": np.nan, "A_PlanTime": np.nan, "A_ExecTime": np.nan, "A_Turns": np.nan, "A_Battery": np.nan,
+                "RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": 0.0
+            }
 
-            row_data = {"world_file": row['world_file']}
-            
-            # ---> Extract the base map name (e.g., 'map_19639') to use as the Gazebo world name
-            parts = row['world_file'].split('_')
-            world_name = f"{parts[0]}_{parts[1]}"
+            process = None
+            map_start = time.time()
+            try:
+                # 1. Launch Gazebo & Nav2
+                launch_cmd = [
+                    "ros2", "launch", "robot_bringup", "robot_gazebo_launch.py",
+                    f"world:={world_file}",
+                    f"spawn_x:={spawn_x}", f"spawn_y:={spawn_y}",
+                    "use_rviz:=false",
+                    "rviz:=false",
+                    "headless:=true",
+                    "gz_args:=-r -s --headless-rendering"
+                ]
+                process = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
 
+                self.get_logger().info("Waiting for simulation to stabilize...")
+                time.sleep(60)
 
-            # ==========================================
-            # RUN 1: DIJKSTRA
-            # ==========================================
-            self.get_logger().info("--- Running Dijkstra ---")
-            res_d = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBased")
-            row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
-            self.reset_robot_to_start(row['spawn_x'], row['spawn_y'],world_name)
-            # ==========================================
-            # RUN 2: A* (A-STAR)
-            # ==========================================
-            self.get_logger().info("--- Running A* ---")
-            res_a = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="GridBasedAstar")
-            row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
-            self.reset_robot_to_start(row['spawn_x'], row['spawn_y'], world_name)
-            # ==========================================
-            # RUN 3: RRT* (20 Iterations)
-            # ==========================================
-            self.get_logger().info(f"--- Running RRT* ({self.rrt_iterations} Iterations) ---")
-            rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
-            
-            for i in range(self.rrt_iterations):
-                self.get_logger().info(f"  > RRT Iteration {i+1}/{self.rrt_iterations}...")
-                self.reset_robot_to_start(row['spawn_x'], row['spawn_y'], world_name)
-                res_rrt = self.execute_single_run(row['spawn_x'], row['spawn_y'], make_goal_pose(), planner_id="RRTStar")
-                if res_rrt.get("PathFound", False):
-                    for key in rrt_metrics.keys():
-                        rrt_metrics[key].append(res_rrt[key])
-            
-            # Average the successful RRT runs
-            if len(rrt_metrics["Mem"]) > 0:
-                row_data.update({
-                    "RRT_Mem": np.mean(rrt_metrics["Mem"]),
-                    "RRT_Cost": np.mean(rrt_metrics["Cost"]),
-                    "RRT_PlanTime": np.mean(rrt_metrics["PlanTime"]),
-                    "RRT_ExecTime": np.mean(rrt_metrics["ExecTime"]),
-                    "RRT_Turns": np.mean(rrt_metrics["Turns"]),
-                    "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
-                })
-            else:
-                self.get_logger().warn(f"RRT* failed all {self.rrt_iterations} attempts!")
-                row_data.update({"RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": np.nan})
+                if not self.wait_nav2_active_with_timeout():
+                    raise TimeoutError("nav2 active timeout")
 
-            # Save to results
-            final_results.append(row_data)
-            pd.DataFrame(final_results).to_csv(self.results_path, index=False)
+                # 2. Setup Goal Pose
+                def make_goal_pose():
+                    gp = PoseStamped()
+                    gp.header.frame_id = 'map'
+                    gp.header.stamp = self.navigator.get_clock().now().to_msg()
+                    gp.pose.position.x = goal_x
+                    gp.pose.position.y = goal_y
+                    gp.pose.orientation.w = 1.0
+                    return gp
 
-            # Cleanup Gazebo before next map
-            self.get_logger().info("Shutting down Gazebo gracefully...")
-            os.killpg(os.getpgid(process.pid), signal.SIGINT)
-            process.wait()
-            time.sleep(5) 
+                # ---> Extract the base map name (e.g., 'map_19639') to use as the Gazebo world name
+                parts = row['world_file'].split('_')
+                world_name = f"{parts[0]}_{parts[1]}"
+
+                # ==========================================
+                # RUN 1: DIJKSTRA
+                # ==========================================
+                self.get_logger().info("--- Running Dijkstra ---")
+                res_d = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
+                self.get_logger().info(f"Run result for GridBased: {res_d}")
+                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
+                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+
+                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after Dijkstra. Skipping remaining planners.")
+                    raise TimeoutError("map timeout")
+
+                # ==========================================
+                # RUN 2: A* (A-STAR)
+                # ==========================================
+                self.get_logger().info("--- Running A* ---")
+                res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
+                self.get_logger().info(f"Run result for GridBasedAstar: {res_a}")
+                row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
+                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+
+                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping RRT*.")
+                    raise TimeoutError("map timeout")
+
+                # ==========================================
+                # RUN 3: RRT* (N Iterations)
+                # ==========================================
+                self.get_logger().info(f"--- Running RRT* ({self.rrt_iterations} Iterations) ---")
+                rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
+                rrt_battery_samples = []
+
+                for i in range(self.rrt_iterations):
+                    if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                        self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached during RRT* at iteration {i+1}.")
+                        break
+                    self.get_logger().info(f"  > RRT Iteration {i+1}/{self.rrt_iterations}...")
+                    self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+                    res_rrt = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="RRTStar")
+                    self.get_logger().info(f"Run result for RRTStar: {res_rrt}")
+                    rrt_battery_samples.append(res_rrt["BatteryDrain"])
+                    if res_rrt.get("PathFound", False):
+                        for key in rrt_metrics.keys():
+                            rrt_metrics[key].append(res_rrt[key])
+
+                if len(rrt_metrics["Mem"]) > 0:
+                    row_data.update({
+                        "RRT_Mem": np.mean(rrt_metrics["Mem"]),
+                        "RRT_Cost": np.mean(rrt_metrics["Cost"]),
+                        "RRT_PlanTime": np.mean(rrt_metrics["PlanTime"]),
+                        "RRT_ExecTime": np.mean(rrt_metrics["ExecTime"]),
+                        "RRT_Turns": np.mean(rrt_metrics["Turns"]),
+                        "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
+                    })
+                else:
+                    self.get_logger().warn("RRT* produced no valid path plans in this map.")
+                    row_data.update({
+                        "RRT_Mem": np.nan,
+                        "RRT_Cost": np.nan,
+                        "RRT_PlanTime": np.nan,
+                        "RRT_ExecTime": np.nan,
+                        "RRT_Turns": np.nan,
+                        "RRT_Battery": float(np.mean(rrt_battery_samples)) if len(rrt_battery_samples) > 0 else 0.0
+                    })
+
+            except TimeoutError:
+                pass
+            except Exception as err:
+                self.get_logger().error(f"Map {row['world_file']} failed with exception: {err}")
+            finally:
+                # Save one row per map, even if partially complete
+                final_results.append(row_data)
+                pd.DataFrame(final_results).to_csv(self.results_path, index=False, na_rep='NaN')
+
+                # Cleanup Gazebo before next map
+                if process is not None:
+                    self.get_logger().info("Shutting down Gazebo gracefully...")
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+                        process.wait(timeout=30)
+                    except Exception:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except Exception:
+                            pass
+                    time.sleep(5)
+
+                self.get_logger().info(f"Completed Map {index+1}/{len(df)}")
 
         self.get_logger().info(f"\nData Collection Complete! Saved to {self.results_path}")
 

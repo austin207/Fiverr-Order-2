@@ -75,3 +75,7 @@ RUN echo "source install/setup.bash" >> ~/.bashrc
 ################################
 ## ADD ANY CUSTOM SETUP BELOW ##
 ################################
+
+# Virtual display + GL3.3-capable software renderer for headless Gazebo ogre2
+RUN sudo apt-get install -y xvfb mesa-utils && \
+    sudo apt-get clean

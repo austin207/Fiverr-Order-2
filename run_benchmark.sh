@@ -51,6 +51,9 @@ docker run \
     --network host \
     --env MAP_COUNT="${MAP_COUNT:-10}" \
     --env RRT_ITERATIONS="${RRT_ITERATIONS:-20}" \
+    --env SINGLE_RUN_TIMEOUT_SEC="${SINGLE_RUN_TIMEOUT_SEC:-0}" \
+    --env MAP_TIMEOUT_SEC="${MAP_TIMEOUT_SEC:-0}" \
+    --env NAV2_ACTIVE_TIMEOUT_SEC="${NAV2_ACTIVE_TIMEOUT_SEC:-0}" \
     --env PREFER_EASY_MAP="${PREFER_EASY_MAP:-0}" \
     --env NVIDIA_DRIVER_CAPABILITIES=all \
     --env LIBGL_ALWAYS_SOFTWARE=1 \
