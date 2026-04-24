@@ -26,6 +26,34 @@ def _create_static_tf_node(context, *args, **kwargs):
     )]
 
 
+def _create_amcl_node(context, *args, **kwargs):
+    """Create AMCL with the map-specific spawn position as the initial pose.
+
+    Without AMCL, map->odom is a static TF that never updates. After each
+    teleport back to spawn, the robot's odom position is still at the goal
+    (~33m away), so MPPI prunes the entire global path as out-of-costmap.
+    AMCL dynamically corrects map->odom after teleport + /initialpose.
+    """
+    spawn_x = float(LaunchConfiguration('spawn_x').perform(context))
+    spawn_y = float(LaunchConfiguration('spawn_y').perform(context))
+    bringup = 'robot_bringup'
+    robot_bringup_path = os.path.join(get_package_share_path(bringup))
+    nav2_params_path = os.path.join(robot_bringup_path, 'config', 'nav2_params_rrt.yaml')
+    return [Node(
+        package='nav2_amcl',
+        executable='amcl',
+        name='amcl',
+        output='screen',
+        parameters=[nav2_params_path,
+                    {'use_sim_time': True,
+                     'set_initial_pose': True,
+                     'initial_pose_x': spawn_x,
+                     'initial_pose_y': spawn_y,
+                     'initial_pose_z': 0.0,
+                     'initial_pose_yaw': 0.0}],
+    )]
+
+
 def generate_launch_description():
     description = 'robot_description'
     bringup = 'robot_bringup'
@@ -116,7 +144,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{'use_sim_time': True,
                      'autostart': True,
-                     'node_names': ['map_server']}],
+                     'node_names': ['map_server', 'amcl']}],
     )
 
     ekf_node = Node(
@@ -141,6 +169,7 @@ def generate_launch_description():
         spawn_robot,
         map_server,
         OpaqueFunction(function=_create_static_tf_node),
+        OpaqueFunction(function=_create_amcl_node),
         localization_lifecycle,
         rviz2_node,
         ekf_node,

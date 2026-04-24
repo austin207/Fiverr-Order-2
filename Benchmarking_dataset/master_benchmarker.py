@@ -285,7 +285,7 @@ class MasterBenchmarker(Node):
     def wait_nav2_active_with_timeout(self):
         timeout = self.nav2_active_timeout_sec if self.nav2_active_timeout_sec > 0 else 120.0
         deadline = time.time() + timeout
-        nodes_needed = ['map_server', 'bt_navigator']
+        nodes_needed = ['map_server', 'amcl', 'bt_navigator']
         active = set()
 
         self.get_logger().info(f"Waiting for Nav2 nodes: {nodes_needed}")
