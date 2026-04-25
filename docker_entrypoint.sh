@@ -6,32 +6,43 @@
 # =============================================================================
 set -eo pipefail
 
-# ── 1. Source ROS 2 Humble ───────────────────────────────────────────────────
-# Note: ROS 2 setup scripts reference unbound variables, so disable -u around them.
+# ── 1. Start virtual display (required even in headless mode for some Qt components) ──
+echo ">>> Starting Xvfb virtual display"
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+Xvfb :99 -screen 0 1280x1024x24 &
+export DISPLAY=:99
+sleep 2
+
+# ── 2. Source ROS 2 Humble ───────────────────────────────────────────────────
 echo ">>> Sourcing ROS 2 Humble"
 source /opt/ros/humble/setup.bash
 
-# ── 2. Build workspace ───────────────────────────────────────────────────────
+# ── 3. Build workspace ───────────────────────────────────────────────────────
 echo ">>> Building workspace at /ros2_ws"
 mkdir -p /ros2_ws
 cd /ros2_ws
-colcon build --symlink-install
+if [ -f "install/setup.bash" ]; then
+  echo ">>> Install already exists — skipping rebuild."
+else
+  colcon build --symlink-install
+fi
 source /ros2_ws/install/setup.bash
 
-# ── 3. Install required Python packages ─────────────────────────────────────
+# ── 4. Install required Python packages ─────────────────────────────────────
 echo ">>> Installing Python dependencies"
 pip install --quiet pandas numpy
 
-# ── 3b. Software renderer env vars (Gazebo uses EGL via --headless-rendering) ──
+# ── 4b. Software renderer env vars ───────────────────────────────────────────
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
 
-# ── 4. Truncate manifest to first 10 maps ───────────────────────────────────
+# ── 5. Truncate manifest to requested MAP_COUNT ──────────────────────────────
 cd /benchmarking
 MANIFEST="dataset/gazebo_worlds/calibration_manifest.csv"
-BACKUP="dataset/gazebo_worlds/calibration_manifest_full.csv"
+# Use a temp backup so we never overwrite calibration_manifest_full.csv
+BACKUP="/tmp/calibration_manifest_original.csv"
 
-echo ">>> Backing up full manifest and creating 10-map manifest"
+echo ">>> Backing up manifest and limiting to ${MAP_COUNT:-10} maps"
 cp "${MANIFEST}" "${BACKUP}"
 MAP_COUNT="${MAP_COUNT:-10}"
 LINES_TO_KEEP=$((MAP_COUNT + 1))
@@ -60,7 +71,7 @@ restore_manifest() {
 trap restore_manifest EXIT
 
 # ── 5. Run benchmarker ───────────────────────────────────────────────────────
-echo ">>> Starting benchmark (${MAP_COUNT} maps)"
+echo ">>> Starting benchmark (${MAP_COUNT:-10} maps)"
 python3 master_benchmarker.py
 STATUS=$?
 
