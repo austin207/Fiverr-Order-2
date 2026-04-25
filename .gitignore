@@ -1,0 +1,17 @@
+# Build artifacts
+navigation/build/
+navigation/install/
+navigation/log/
+
+# Python cache
+**/__pycache__/
+*.pyc
+
+# Backup files
+*.bak
+
+# Downloaded/extracted packages
+Benchmarking_dataset/ros-humble-nav2-navfn-planner-1.1.20/
+
+# Claude internal
+.claude/
