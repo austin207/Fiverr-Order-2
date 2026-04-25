@@ -161,6 +161,27 @@ def cmd_vel_callback(self, msg):
 
 ---
 
+### BUG 4 — Cross-map stale TF odom causes A*/RRT* instant "0 poses" on map 2+
+
+**File:** `master_benchmarker.py` — `_update_map_odom_static_tf()` and `run_benchmark()`
+
+**Problem:** `_update_map_odom_static_tf()` called `self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())` to get the current robot odom position. With `time=0`, TF2 returns the highest-timestamp transform. Map 1's EKF ended at sim_time ~400s; map 2's fresh EKF starts at ~0s — so the buffer returned map 1's stale odom `(73.077, -72.592)` instead of map 2's fresh `(0, 0)`. This produced a grossly incorrect map→odom static TF, causing MPPI to find no path poses within its 5m search radius → instant "0 poses" on all planners for map 2+.
+
+**Fix:** Subscribe to `/odometry/filtered` directly (most-recently-received, no timestamp comparison):
+```python
+self.odom_sub = self.create_subscription(
+    Odometry, '/odometry/filtered', self._odom_callback, 10)
+
+def _odom_callback(self, msg):
+    self.current_odom_x = msg.pose.pose.position.x
+    self.current_odom_y = msg.pose.pose.position.y
+```
+Reset `current_odom_x/y = 0.0` at the start of each map. Use these values directly in `_update_map_odom_static_tf()` instead of the TF buffer lookup.
+
+**Verified:** 2-map smoke test — map 2 TF-CORRECT shows fresh `robot_odom=(21.878, -21.370)`, A*/RRT* get 138/458 poses respectively (not instant 0).
+
+---
+
 ## Important Notes
 
 - The `time.sleep(60)` on line 235 has a stale comment saying "15 seconds" — the actual wait is 60 seconds. Do not reduce this without testing on target hardware.

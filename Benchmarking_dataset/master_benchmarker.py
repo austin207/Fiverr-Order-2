@@ -30,11 +30,10 @@ Metric Collection Methods:
 import copy
 import rclpy
 import rclpy.time
-import rclpy.parameter
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Float32MultiArray
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
@@ -77,7 +76,18 @@ class MasterBenchmarker(Node):
         self.drain_constant = 0.01
         self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_callback, 10)
 
-        # TF2 buffer for diagnostics
+        # Direct odom subscription — used to compute the map→odom correction after
+        # each teleport.  The TF buffer's time=0 lookup can return stale values from a
+        # previous map's simulation when sim-time resets between maps (high sim-time from
+        # map N beats low sim-time from map N+1 in "latest" semantics).  Subscribing to
+        # /odometry/filtered directly gives us the most-recently-received message with no
+        # timestamp ambiguity.
+        self.current_odom_x = 0.0
+        self.current_odom_y = 0.0
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odometry/filtered', self._odom_callback, 10)
+
+        # TF2 buffer kept for TF-DIAG logging only (not used for corrections).
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         # Static TF broadcaster for map→odom.
@@ -138,6 +148,11 @@ class MasterBenchmarker(Node):
             self.current_battery_drain += linear_velocity * dt * self.drain_constant
         self.last_cmd_vel_time = now
 
+    def _odom_callback(self, msg):
+        """Track the latest EKF-filtered odometry position for map→odom correction."""
+        self.current_odom_x = msg.pose.pose.position.x
+        self.current_odom_y = msg.pose.pose.position.y
+
     def _spin_for(self, seconds):
         """Spin this node for exactly `seconds` wall-clock time, processing callbacks."""
         t_end = time.time() + seconds
@@ -160,13 +175,11 @@ class MasterBenchmarker(Node):
 
         AMCL's tf_broadcast is disabled so it cannot override this with a stale value.
         """
-        try:
-            t = self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())
-            odom_x = t.transform.translation.x
-            odom_y = t.transform.translation.y
-        except Exception as e:
-            self.get_logger().warn(f"[TF-CORRECT] Could not read odom pose: {e}")
-            return
+        # Use the position from /odometry/filtered callback — immune to the TF-buffer
+        # sim-time stale-value bug where high timestamps from the previous map's session
+        # shadow low timestamps from the freshly started simulation.
+        odom_x = self.current_odom_x
+        odom_y = self.current_odom_y
 
         correction_x = float(spawn_x) - odom_x
         correction_y = float(spawn_y) - odom_y
@@ -393,6 +406,11 @@ class MasterBenchmarker(Node):
                 "A_Mem": np.nan, "A_Cost": np.nan, "A_PlanTime": np.nan, "A_ExecTime": np.nan, "A_Turns": np.nan, "A_Battery": np.nan,
                 "RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": 0.0
             }
+
+            # Reset odom tracking so stale values from the previous map's session
+            # never bleed into this map's TF correction (fresh EKF will overwrite).
+            self.current_odom_x = 0.0
+            self.current_odom_y = 0.0
 
             process = None
             map_start = time.time()
