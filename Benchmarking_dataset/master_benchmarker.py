@@ -236,9 +236,10 @@ class MasterBenchmarker(Node):
         self.initialpose_pub.publish(msg)
         self._spin_for(1.0)
 
-        # Clear costmaps so stale obstacle cells from the previous run don't block.
-        self.navigator.clearAllCostmaps()
-        self._spin_for(0.5)
+        # Clear local costmap only — the global static layer doesn't need clearing
+        # and clearing it causes a ~1s repopulation delay that can confuse subsequent planners.
+        self.navigator.clearLocalCostmap()
+        self._spin_for(2.0)
     def execute_single_run(self, spawn_x, spawn_y, goal_pose, planner_id):
         """Executes a single navigation attempt and returns the 5 metrics."""
         # Reset state BEFORE sending goal to avoid stale callback data
@@ -318,6 +319,12 @@ class MasterBenchmarker(Node):
             time.sleep(0.1)
 
         exec_time = time.time() - motion_start
+
+        if self.single_run_timeout_sec > 0 and exec_time >= self.single_run_timeout_sec:
+            self.get_logger().warn(
+                f"{planner_id} timed out after {exec_time:.1f}s, logging as failure.")
+            return {"Success": False}
+
         result = self.navigator.getResult()
         self.get_logger().info(f"TaskResult for {planner_id}: {result}")
 
@@ -464,25 +471,25 @@ class MasterBenchmarker(Node):
                 world_name = f"{parts[0]}_{parts[1]}"
 
                 # ==========================================
-                # RUN 1: DIJKSTRA
-                # ==========================================
-                self.get_logger().info("--- Running Dijkstra ---")
-                res_d = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
-                self.get_logger().info(f"Run result for GridBased: {res_d}")
-                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
-                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
-
-                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
-                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after Dijkstra. Skipping remaining planners.")
-                    raise TimeoutError("map timeout")
-
-                # ==========================================
-                # RUN 2: A* (A-STAR)
+                # RUN 1: A* (A-STAR) — run first while Nav2 state is fresh
                 # ==========================================
                 self.get_logger().info("--- Running A* ---")
                 res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
                 self.get_logger().info(f"Run result for GridBasedAstar: {res_a}")
                 row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
+                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+
+                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping remaining planners.")
+                    raise TimeoutError("map timeout")
+
+                # ==========================================
+                # RUN 2: DIJKSTRA
+                # ==========================================
+                self.get_logger().info("--- Running Dijkstra ---")
+                res_d = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
+                self.get_logger().info(f"Run result for GridBased: {res_d}")
+                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
                 self.reset_robot_to_start(spawn_x, spawn_y, world_name)
 
                 if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
@@ -504,7 +511,7 @@ class MasterBenchmarker(Node):
                     self.reset_robot_to_start(spawn_x, spawn_y, world_name)
                     res_rrt = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="RRTStar")
                     self.get_logger().info(f"Run result for RRTStar: {res_rrt}")
-                    rrt_battery_samples.append(res_rrt["BatteryDrain"])
+                    rrt_battery_samples.append(res_rrt.get("BatteryDrain", 0.0))
                     if res_rrt.get("PathFound", False):
                         for key in rrt_metrics.keys():
                             rrt_metrics[key].append(res_rrt[key])
