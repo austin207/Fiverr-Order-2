@@ -415,6 +415,7 @@ class MasterBenchmarker(Node):
         df = pd.read_csv(self.manifest_path)
         final_results = []
         start_map_index = int(os.getenv('START_MAP_INDEX', '0'))
+        max_spawn_retries = int(os.getenv('MAX_SPAWN_RETRIES', '2'))
 
         for index, row in df.iterrows():
             if index < start_map_index:
@@ -437,180 +438,194 @@ class MasterBenchmarker(Node):
                 "RRT_Mem": np.nan, "RRT_Cost": np.nan, "RRT_PlanTime": np.nan, "RRT_ExecTime": np.nan, "RRT_Turns": np.nan, "RRT_Battery": 0.0
             }
 
-            # Reset odom tracking so stale values from the previous map's session
-            # never bleed into this map's TF correction (fresh EKF will overwrite).
-            self.current_odom_x = 0.0
-            self.current_odom_y = 0.0
-
-            process = None
             map_start = time.time()
-            try:
-                # 1. Launch Gazebo & Nav2
-                launch_cmd = [
-                    "ros2", "launch", "robot_bringup", "robot_gazebo_launch.py",
-                    f"world:={world_file}",
-                    f"spawn_x:={spawn_x}", f"spawn_y:={spawn_y}",
-                    "use_rviz:=false",
-                    "rviz:=false",
-                    "headless:=true",
-                    "gz_args:=-r -s --headless-rendering"
-                ]
-                process = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
 
-                # Publish initial static map→odom immediately so Nav2 nodes can
-                # configure their costmaps as soon as they start.  At startup the robot
-                # is at the spawn position and odom origin is (0,0), so the correction
-                # is simply (spawn_x, spawn_y).  No odom lookup needed here.
-                ts0 = TransformStamped()
-                ts0.header.stamp = rclpy.time.Time().to_msg()
-                ts0.header.frame_id = 'map'
-                ts0.child_frame_id = 'odom'
-                ts0.transform.translation.x = float(spawn_x)
-                ts0.transform.translation.y = float(spawn_y)
-                ts0.transform.translation.z = 0.0
-                ts0.transform.rotation.w = 1.0
-                self.static_tf_broadcaster.sendTransform(ts0)
-                self.get_logger().info(
-                    f"[TF-CORRECT] initial static map→odom = ({spawn_x}, {spawn_y})")
-
-                # Spin (not sleep) for 60s so stale DDS-buffered odom messages from
-                # the previous map's EKF are delivered and discarded BEFORE we start
-                # watching for a fresh spawn signal.  Pure time.sleep() would leave
-                # those messages queued, causing a false-positive on the first spin_once.
-                self.get_logger().info("Waiting for simulation to stabilize (draining stale callbacks)...")
-                self._spin_for(60)
-
-                # Now that all queued stale messages have been processed, reset the
-                # flag so only NEW messages (from the just-launched simulation) count.
+            for spawn_attempt in range(max_spawn_retries + 1):
+                # Reset odom tracking so stale values from a previous attempt never
+                # bleed into this attempt's TF correction.
+                self.current_odom_x = 0.0
+                self.current_odom_y = 0.0
                 self.received_fresh_odom = False
 
-                # Wait for the robot to actually spawn in Gazebo by waiting for a
-                # fresh /odometry/filtered message from the new EKF session.
-                # Corridors/Mazes maps can take 600+ s to load in Docker so a fixed
-                # sleep is insufficient.  The odom topic only publishes once the robot
-                # entity exists in Gazebo and the EKF has received diff-drive/IMU data.
-                odom_wait_deadline = time.time() + 600.0
-                self.get_logger().info("Waiting for robot odometry (fresh /odometry/filtered)...")
-                while not self.received_fresh_odom and time.time() < odom_wait_deadline:
-                    rclpy.spin_once(self, timeout_sec=0.5)
-                if self.received_fresh_odom:
-                    self.get_logger().info("Robot odometry received. Proceeding to Nav2 activation.")
-                else:
-                    self.get_logger().warn(
-                        "Odometry did not appear within 600s — robot may not have spawned. "
-                        "Proceeding anyway.")
+                process = None
+                spawn_failed = False
+                try:
+                    # 1. Launch Gazebo & Nav2
+                    launch_cmd = [
+                        "ros2", "launch", "robot_bringup", "robot_gazebo_launch.py",
+                        f"world:={world_file}",
+                        f"spawn_x:={spawn_x}", f"spawn_y:={spawn_y}",
+                        "use_rviz:=false",
+                        "rviz:=false",
+                        "headless:=true",
+                        "gz_args:=-r -s --headless-rendering"
+                    ]
+                    process = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
 
-                if not self.wait_nav2_active_with_timeout():
-                    raise TimeoutError("nav2 active timeout")
+                    # Publish initial static map→odom immediately so Nav2 nodes can
+                    # configure their costmaps as soon as they start.  At startup the robot
+                    # is at the spawn position and odom origin is (0,0), so the correction
+                    # is simply (spawn_x, spawn_y).  No odom lookup needed here.
+                    ts0 = TransformStamped()
+                    ts0.header.stamp = rclpy.time.Time().to_msg()
+                    ts0.header.frame_id = 'map'
+                    ts0.child_frame_id = 'odom'
+                    ts0.transform.translation.x = float(spawn_x)
+                    ts0.transform.translation.y = float(spawn_y)
+                    ts0.transform.translation.z = 0.0
+                    ts0.transform.rotation.w = 1.0
+                    self.static_tf_broadcaster.sendTransform(ts0)
+                    self.get_logger().info(
+                        f"[TF-CORRECT] initial static map→odom = ({spawn_x}, {spawn_y})")
 
-                # 2. Setup Goal Pose
-                def make_goal_pose():
-                    gp = PoseStamped()
-                    gp.header.frame_id = 'map'
-                    gp.header.stamp = self.navigator.get_clock().now().to_msg()
-                    gp.pose.position.x = goal_x
-                    gp.pose.position.y = goal_y
-                    gp.pose.orientation.w = 1.0
-                    return gp
+                    # Spin (not sleep) for 60s so stale DDS-buffered odom messages from
+                    # the previous map's EKF are delivered and discarded BEFORE we start
+                    # watching for a fresh spawn signal.  Pure time.sleep() would leave
+                    # those messages queued, causing a false-positive on the first spin_once.
+                    self.get_logger().info("Waiting for simulation to stabilize (draining stale callbacks)...")
+                    self._spin_for(60)
 
-                # ---> Extract the base map name (e.g., 'map_19639') to use as the Gazebo world name
-                parts = row['world_file'].split('_')
-                world_name = f"{parts[0]}_{parts[1]}"
+                    # Now that all queued stale messages have been processed, reset the
+                    # flag so only NEW messages (from the just-launched simulation) count.
+                    self.received_fresh_odom = False
 
-                # ==========================================
-                # RUN 1: A* (A-STAR) — run first while Nav2 state is fresh
-                # ==========================================
-                self.get_logger().info("--- Running A* ---")
-                res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
-                self.get_logger().info(f"Run result for GridBasedAstar: {res_a}")
-                row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
-                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+                    # Wait for the robot to actually spawn in Gazebo by waiting for a
+                    # fresh /odometry/filtered message from the new EKF session.
+                    # Corridors/Mazes maps can take 600+ s to load in Docker so a fixed
+                    # sleep is insufficient.  The odom topic only publishes once the robot
+                    # entity exists in Gazebo and the EKF has received diff-drive/IMU data.
+                    odom_wait_deadline = time.time() + 600.0
+                    self.get_logger().info("Waiting for robot odometry (fresh /odometry/filtered)...")
+                    while not self.received_fresh_odom and time.time() < odom_wait_deadline:
+                        rclpy.spin_once(self, timeout_sec=0.5)
+                    if self.received_fresh_odom:
+                        self.get_logger().info("Robot odometry received. Proceeding to Nav2 activation.")
+                    else:
+                        self.get_logger().warn(
+                            "Odometry did not appear within 600s — robot may not have spawned. "
+                            "Proceeding anyway.")
 
-                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
-                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping remaining planners.")
-                    raise TimeoutError("map timeout")
+                    if not self.wait_nav2_active_with_timeout():
+                        raise TimeoutError("nav2 active timeout")
 
-                # ==========================================
-                # RUN 2: DIJKSTRA
-                # ==========================================
-                self.get_logger().info("--- Running Dijkstra ---")
-                res_d = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
-                self.get_logger().info(f"Run result for GridBased: {res_d}")
-                row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
-                self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+                    # 2. Setup Goal Pose
+                    def make_goal_pose():
+                        gp = PoseStamped()
+                        gp.header.frame_id = 'map'
+                        gp.header.stamp = self.navigator.get_clock().now().to_msg()
+                        gp.pose.position.x = goal_x
+                        gp.pose.position.y = goal_y
+                        gp.pose.orientation.w = 1.0
+                        return gp
 
-                if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
-                    self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping RRT*.")
-                    raise TimeoutError("map timeout")
+                    # ---> Extract the base map name (e.g., 'map_19639') to use as the Gazebo world name
+                    parts = row['world_file'].split('_')
+                    world_name = f"{parts[0]}_{parts[1]}"
 
-                # ==========================================
-                # RUN 3: RRT* (N Iterations)
-                # ==========================================
-                self.get_logger().info(f"--- Running RRT* ({self.rrt_iterations} Iterations) ---")
-                rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
-                rrt_battery_samples = []
-
-                for i in range(self.rrt_iterations):
-                    if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
-                        self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached during RRT* at iteration {i+1}.")
-                        break
-                    self.get_logger().info(f"  > RRT Iteration {i+1}/{self.rrt_iterations}...")
+                    # ==========================================
+                    # RUN 1: A* (A-STAR) — run first while Nav2 state is fresh
+                    # ==========================================
+                    self.get_logger().info("--- Running A* ---")
+                    res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
+                    self.get_logger().info(f"Run result for GridBasedAstar: {res_a}")
+                    row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
                     self.reset_robot_to_start(spawn_x, spawn_y, world_name)
-                    res_rrt = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="RRTStar")
-                    self.get_logger().info(f"Run result for RRTStar: {res_rrt}")
-                    rrt_battery_samples.append(res_rrt.get("BatteryDrain", 0.0))
-                    if res_rrt.get("PathFound", False):
-                        for key in rrt_metrics.keys():
-                            rrt_metrics[key].append(res_rrt[key])
 
-                if len(rrt_metrics["Mem"]) > 0:
-                    row_data.update({
-                        "RRT_Mem": np.mean(rrt_metrics["Mem"]),
-                        "RRT_Cost": np.mean(rrt_metrics["Cost"]),
-                        "RRT_PlanTime": np.mean(rrt_metrics["PlanTime"]),
-                        "RRT_ExecTime": np.mean(rrt_metrics["ExecTime"]),
-                        "RRT_Turns": np.mean(rrt_metrics["Turns"]),
-                        "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
-                    })
-                else:
-                    self.get_logger().warn("RRT* produced no valid path plans in this map.")
-                    row_data.update({
-                        "RRT_Mem": np.nan,
-                        "RRT_Cost": np.nan,
-                        "RRT_PlanTime": np.nan,
-                        "RRT_ExecTime": np.nan,
-                        "RRT_Turns": np.nan,
-                        "RRT_Battery": float(np.mean(rrt_battery_samples)) if len(rrt_battery_samples) > 0 else 0.0
-                    })
+                    if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                        self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping remaining planners.")
+                        raise TimeoutError("map timeout")
 
-            except TimeoutError:
-                pass
-            except Exception as err:
-                self.get_logger().error(f"Map {row['world_file']} failed with exception: {err}")
-            finally:
-                # Append one row per map immediately so partial results survive a crash.
-                # Append mode keeps any rows written by earlier runs (e.g. resumed run).
-                results_df = pd.DataFrame([row_data])
-                write_header = not os.path.exists(self.results_path)
-                results_df.to_csv(
-                    self.results_path, mode='a', header=write_header,
-                    index=False, na_rep='NaN'
-                )
+                    # ==========================================
+                    # RUN 2: DIJKSTRA
+                    # ==========================================
+                    self.get_logger().info("--- Running Dijkstra ---")
+                    res_d = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
+                    self.get_logger().info(f"Run result for GridBased: {res_d}")
+                    row_data.update({"D_Mem": res_d["Mem"], "D_Cost": res_d["Cost"], "D_PlanTime": res_d["PlanTime"], "D_ExecTime": res_d["ExecTime"], "D_Turns": res_d["Turns"], "D_Battery": res_d["BatteryDrain"]})
+                    self.reset_robot_to_start(spawn_x, spawn_y, world_name)
 
-                # Cleanup Gazebo before next map
-                if process is not None:
-                    self.get_logger().info("Shutting down Gazebo gracefully...")
-                    try:
-                        os.killpg(os.getpgid(process.pid), signal.SIGINT)
-                        process.wait(timeout=30)
-                    except Exception:
+                    if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                        self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached after A*. Skipping RRT*.")
+                        raise TimeoutError("map timeout")
+
+                    # ==========================================
+                    # RUN 3: RRT* (N Iterations)
+                    # ==========================================
+                    self.get_logger().info(f"--- Running RRT* ({self.rrt_iterations} Iterations) ---")
+                    rrt_metrics = {"Mem": [], "Cost": [], "PlanTime": [], "ExecTime": [], "Turns": [], "BatteryDrain": []}
+                    rrt_battery_samples = []
+
+                    for i in range(self.rrt_iterations):
+                        if self.map_timeout_sec > 0 and (time.time() - map_start) > self.map_timeout_sec:
+                            self.get_logger().warn(f"Map timeout ({self.map_timeout_sec:.1f}s) reached during RRT* at iteration {i+1}.")
+                            break
+                        self.get_logger().info(f"  > RRT Iteration {i+1}/{self.rrt_iterations}...")
+                        self.reset_robot_to_start(spawn_x, spawn_y, world_name)
+                        res_rrt = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="RRTStar")
+                        self.get_logger().info(f"Run result for RRTStar: {res_rrt}")
+                        rrt_battery_samples.append(res_rrt.get("BatteryDrain", 0.0))
+                        if res_rrt.get("PathFound", False):
+                            for key in rrt_metrics.keys():
+                                rrt_metrics[key].append(res_rrt[key])
+
+                    if len(rrt_metrics["Mem"]) > 0:
+                        row_data.update({
+                            "RRT_Mem": np.mean(rrt_metrics["Mem"]),
+                            "RRT_Cost": np.mean(rrt_metrics["Cost"]),
+                            "RRT_PlanTime": np.mean(rrt_metrics["PlanTime"]),
+                            "RRT_ExecTime": np.mean(rrt_metrics["ExecTime"]),
+                            "RRT_Turns": np.mean(rrt_metrics["Turns"]),
+                            "RRT_Battery": np.mean(rrt_metrics["BatteryDrain"])
+                        })
+                    else:
+                        self.get_logger().warn("RRT* produced no valid path plans in this map.")
+                        row_data.update({
+                            "RRT_Mem": np.nan,
+                            "RRT_Cost": np.nan,
+                            "RRT_PlanTime": np.nan,
+                            "RRT_ExecTime": np.nan,
+                            "RRT_Turns": np.nan,
+                            "RRT_Battery": float(np.mean(rrt_battery_samples)) if len(rrt_battery_samples) > 0 else 0.0
+                        })
+
+                except TimeoutError as e:
+                    # Only startup/environment failures trigger a retry.
+                    # Navigation timeouts (map timeout) fall through without retrying.
+                    if 'nav2 active' in str(e):
+                        spawn_failed = True
+                except Exception as err:
+                    self.get_logger().error(f"Map {row['world_file']} failed with exception: {err}")
+                finally:
+                    # Always clean up Gazebo before retrying or moving to the next map.
+                    if process is not None:
+                        self.get_logger().info("Shutting down Gazebo gracefully...")
                         try:
-                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+                            process.wait(timeout=30)
                         except Exception:
-                            pass
-                    time.sleep(5)
+                            try:
+                                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                            except Exception:
+                                pass
+                        time.sleep(5)
 
-                self.get_logger().info(f"Completed Map {index+1}/{len(df)}")
+                if spawn_failed and spawn_attempt < max_spawn_retries:
+                    self.get_logger().warn(
+                        f"Startup/spawn failure on attempt {spawn_attempt + 1}/{max_spawn_retries + 1} "
+                        f"for {row['world_file']} — retrying...")
+                    continue
+                break  # success, map timeout, or all retries exhausted
+
+            # Append one row per map immediately so partial results survive a crash.
+            # Written once outside the retry loop — captures the best successful attempt
+            # or zeros/NaN if all spawn attempts failed.
+            results_df = pd.DataFrame([row_data])
+            write_header = not os.path.exists(self.results_path)
+            results_df.to_csv(
+                self.results_path, mode='a', header=write_header,
+                index=False, na_rep='NaN'
+            )
+            self.get_logger().info(f"Completed Map {index+1}/{len(df)}")
 
         self.get_logger().info(f"\nData Collection Complete! Saved to {self.results_path}")
 
