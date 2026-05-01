@@ -31,10 +31,13 @@ wc -l dataset/gazebo_worlds/calibration_manifest.csv
 # Clear any previous partial results
 rm -f dataset/ann_real_world_targets.csv
 
-echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=20) ==="
+echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=20, all 100 maps) ==="
 export RRT_ITERATIONS=20
-export SINGLE_RUN_TIMEOUT_SEC=300
-export NAV2_ACTIVE_TIMEOUT_SEC=120
+export SINGLE_RUN_TIMEOUT_SEC=600
+export NAV2_ACTIVE_TIMEOUT_SEC=600
+export ODOM_WAIT_TIMEOUT_SEC=1200   # Corridors maps have 1,700+ SDF links and need up to 700s to spawn
+export MAX_SPAWN_RETRIES=1
+export START_MAP_INDEX=0
 
 python3 master_benchmarker.py
 EXIT_CODE=$?
