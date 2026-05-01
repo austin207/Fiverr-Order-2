@@ -34,7 +34,8 @@ from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import String as StringMsg
+import json
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
 import pandas as pd
@@ -58,7 +59,7 @@ class MasterBenchmarker(Node):
         
         # Subscriptions to capture C++ metrics and Path Cost
         self.path_sub = self.create_subscription(Path, '/plan', self.path_callback, 10)
-        self.metrics_sub = self.create_subscription(Float32MultiArray, '/planner_metrics', self.metrics_callback, 10)
+        self.metrics_sub = self.create_subscription(StringMsg, '/planner_metrics', self.metrics_callback, 10)
         
         # State variables for the current run
         self.current_path_cost = 0.0
@@ -134,11 +135,13 @@ class MasterBenchmarker(Node):
         self.plan_received = True
 
     def metrics_callback(self, msg):
-        """Catches Mem, PlanTime, and Success flag from custom C++ planner plugins."""
-        if msg and len(msg.data) >= 2:
-            self.current_mem = float(msg.data[0])
-            self.current_plan_time = float(msg.data[1])
-            self.current_plan_success = bool(msg.data[2]) if len(msg.data) >= 3 else True
+        """Catches Mem and PlanTime from custom C++ planner plugins (JSON string payload)."""
+        try:
+            data = json.loads(msg.data)
+            self.current_mem = float(data["Mem"])
+            self.current_plan_time = float(data["PlanTime"])
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            self.get_logger().warn(f"planner_metrics parse error: {e} | raw: {msg.data[:120]}")
 
     def cmd_vel_callback(self, msg):
         """Integrates linear velocity over time to estimate battery drain per run."""
@@ -494,16 +497,17 @@ class MasterBenchmarker(Node):
                     # Corridors/Mazes maps can take 600+ s to load in Docker so a fixed
                     # sleep is insufficient.  The odom topic only publishes once the robot
                     # entity exists in Gazebo and the EKF has received diff-drive/IMU data.
-                    odom_wait_deadline = time.time() + 600.0
-                    self.get_logger().info("Waiting for robot odometry (fresh /odometry/filtered)...")
+                    odom_wait_sec = float(os.getenv('ODOM_WAIT_TIMEOUT_SEC', '600'))
+                    odom_wait_deadline = time.time() + odom_wait_sec
+                    self.get_logger().info(f"Waiting for robot odometry (fresh /odometry/filtered, timeout={odom_wait_sec:.0f}s)...")
                     while not self.received_fresh_odom and time.time() < odom_wait_deadline:
                         rclpy.spin_once(self, timeout_sec=0.5)
                     if self.received_fresh_odom:
                         self.get_logger().info("Robot odometry received. Proceeding to Nav2 activation.")
                     else:
-                        self.get_logger().warn(
-                            "Odometry did not appear within 600s — robot may not have spawned. "
-                            "Proceeding anyway.")
+                        self.get_logger().error(
+                            "Odometry did not appear within 600s — robot did not spawn. Triggering retry.")
+                        raise TimeoutError("nav2 active timeout")
 
                     if not self.wait_nav2_active_with_timeout():
                         raise TimeoutError("nav2 active timeout")
@@ -607,7 +611,11 @@ class MasterBenchmarker(Node):
                                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                             except Exception:
                                 pass
-                        time.sleep(5)
+                    # Kill any lingering Gazebo/ign processes that survived the process group kill
+                    import subprocess as _sp
+                    _sp.run('pkill -9 -f "gz sim" ; pkill -9 -f "ign_gazebo" ; pkill -9 -f "ruby.*gazebo" ; true',
+                            shell=True, capture_output=True)
+                    time.sleep(20)
 
                 if spawn_failed and spawn_attempt < max_spawn_retries:
                     self.get_logger().warn(
