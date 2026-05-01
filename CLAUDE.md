@@ -182,6 +182,48 @@ Reset `current_odom_x/y = 0.0` at the start of each map. Use these values direct
 
 ---
 
+### BUG 5 — Dijkstra (NavFn) fails on Corridors and Mazes maps with `GETPATH RETURNED NONE`
+
+**File:** `nav2_params_rrt.yaml` lines 268–271
+
+**Problem:** `nav2_navfn_planner/NavfnPlanner` uses gradient wavefront propagation, not true graph search. In tight corridors and mazes, costmap inflation (`inflation_radius: 0.30m`) creates high-cost cells that block the wavefront. The wavefront gets stuck in local minima and cannot propagate to the goal — returning `GETPATH RETURNED NONE` even though a valid path provably exists (verified by pure Python Dijkstra on the raw occupancy grid). The client confirmed paths are always traversable.
+
+**Root cause difference:** NavFn fills a potential field starting from the goal; in complex environments the gradient becomes flat or oscillatory in narrow passages, causing path extraction to fail. SmacPlanner2D performs a proper A* graph search on the costmap grid and finds the same path reliably.
+
+**Fix:** Replace `GridBased` plugin from `NavfnPlanner` to `SmacPlanner2D` with `cost_travel_multiplier: 0.0`. Setting the multiplier to `0.0` disables the heuristic weighting, making the search purely uniform-cost (Dijkstra behaviour). `GridBasedAstar` keeps `cost_travel_multiplier: 2.0` for strong goal-directed A* guidance.
+
+```yaml
+# Before:
+GridBased:
+  plugin: 'nav2_navfn_planner/NavfnPlanner'
+  tolerance: 3.0
+  use_astar: false
+  allow_unknown: true
+
+# After:
+GridBased:
+  plugin: 'nav2_smac_planner/SmacPlanner2D'
+  tolerance: 3.0
+  downsample_costmap: false
+  downsampling_factor: 1
+  allow_unknown: true
+  max_iterations: 1000000
+  max_on_approach_iterations: 1000
+  max_planning_time: 10.0
+  motion_model_for_search: "MOORE"
+  cost_travel_multiplier: 0.0      # ← 0.0 = uniform-cost / Dijkstra; 2.0 = A*
+  use_final_approach_orientation: false
+  smoother:
+    max_iterations: 1000
+    w_smooth: 0.3
+    w_data: 0.2
+    tolerance: 1.0e-10
+    do_refinement: true
+    refinement_num: 2
+```
+
+---
+
 ## Important Notes
 
 - The `time.sleep(60)` on line 235 has a stale comment saying "15 seconds" — the actual wait is 60 seconds. Do not reduce this without testing on target hardware.

@@ -25,16 +25,14 @@ source /navigation/install/setup.bash
 echo "=== [4/5] Setting up 9-map Rooms/Corridors/Mazes run ==="
 cd /Benchmarking_dataset
 
-# Clear any previous results
-rm -f dataset/ann_real_world_targets.csv
-
 echo "Using calibration_manifest.csv (9 maps: Rooms, Corridors, Mazes)"
 wc -l dataset/gazebo_worlds/calibration_manifest.csv
 
-echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=3) ==="
+echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=3, resuming from map 4) ==="
 export RRT_ITERATIONS=3
-export SINGLE_RUN_TIMEOUT_SEC=300
-export NAV2_ACTIVE_TIMEOUT_SEC=240
+export SINGLE_RUN_TIMEOUT_SEC=600
+export NAV2_ACTIVE_TIMEOUT_SEC=600
+export START_MAP_INDEX=3
 
 python3 master_benchmarker.py
 EXIT_CODE=$?

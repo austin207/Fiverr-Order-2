@@ -84,6 +84,7 @@ class MasterBenchmarker(Node):
         # timestamp ambiguity.
         self.current_odom_x = 0.0
         self.current_odom_y = 0.0
+        self.received_fresh_odom = False  # set True once new-map EKF publishes
         self.odom_sub = self.create_subscription(
             Odometry, '/odometry/filtered', self._odom_callback, 10)
 
@@ -150,6 +151,7 @@ class MasterBenchmarker(Node):
 
     def _odom_callback(self, msg):
         """Track the latest EKF-filtered odometry position for map→odom correction."""
+        self.received_fresh_odom = True
         self.current_odom_x = msg.pose.pose.position.x
         self.current_odom_y = msg.pose.pose.position.y
 
@@ -306,13 +308,21 @@ class MasterBenchmarker(Node):
         # Deep-copy avoids the action-result-future GC bug where the C++ backing
         # buffer can be freed between getPath() and followPath(), sending 0 poses.
         self.get_logger().info("Path found! Driving to goal...")
+
+        # RRT* gets 900s when a path is found (stochastic planner needs more time);
+        # all other planners use the configured SINGLE_RUN_TIMEOUT_SEC (default 300s).
+        if planner_id == "RRTStar":
+            effective_timeout = 900.0
+        else:
+            effective_timeout = self.single_run_timeout_sec
+
         motion_start = time.time()
         self.navigator.followPath(copy.deepcopy(path))
-        
+
         while not self.navigator.isTaskComplete():
-            if self.single_run_timeout_sec > 0 and (time.time() - motion_start) > self.single_run_timeout_sec:
+            if effective_timeout > 0 and (time.time() - motion_start) > effective_timeout:
                 self.get_logger().warn(
-                    f"{planner_id} execution timeout after {self.single_run_timeout_sec:.1f}s. Cancelling task.")
+                    f"{planner_id} execution timeout after {effective_timeout:.1f}s. Cancelling task.")
                 self.navigator.cancelTask()
                 break
             rclpy.spin_once(self, timeout_sec=0.0)
@@ -320,10 +330,19 @@ class MasterBenchmarker(Node):
 
         exec_time = time.time() - motion_start
 
-        if self.single_run_timeout_sec > 0 and exec_time >= self.single_run_timeout_sec:
+        if effective_timeout > 0 and exec_time >= effective_timeout:
             self.get_logger().warn(
                 f"{planner_id} timed out after {exec_time:.1f}s, logging as failure.")
-            return {"Success": False}
+            return {
+                "Mem": self.current_mem,
+                "Cost": self.current_path_cost,
+                "PlanTime": self.current_plan_time,
+                "ExecTime": exec_time,
+                "Turns": self.current_turns,
+                "BatteryDrain": self.current_battery_drain,
+                "Success": False,
+                "PathFound": True,
+            }
 
         result = self.navigator.getResult()
         self.get_logger().info(f"TaskResult for {planner_id}: {result}")
@@ -395,8 +414,12 @@ class MasterBenchmarker(Node):
     def run_benchmark(self):
         df = pd.read_csv(self.manifest_path)
         final_results = []
+        start_map_index = int(os.getenv('START_MAP_INDEX', '0'))
 
         for index, row in df.iterrows():
+            if index < start_map_index:
+                self.get_logger().info(f"Skipping Map {index+1}/{len(df)} (START_MAP_INDEX={start_map_index})")
+                continue
             world_file = os.path.join(self.worlds_dir, row['world_file'])
             spawn_x = float(row['spawn_x'])
             spawn_y = float(row['spawn_y'])
@@ -450,8 +473,32 @@ class MasterBenchmarker(Node):
                 self.get_logger().info(
                     f"[TF-CORRECT] initial static map→odom = ({spawn_x}, {spawn_y})")
 
-                self.get_logger().info("Waiting for simulation to stabilize...")
-                time.sleep(60)
+                # Spin (not sleep) for 60s so stale DDS-buffered odom messages from
+                # the previous map's EKF are delivered and discarded BEFORE we start
+                # watching for a fresh spawn signal.  Pure time.sleep() would leave
+                # those messages queued, causing a false-positive on the first spin_once.
+                self.get_logger().info("Waiting for simulation to stabilize (draining stale callbacks)...")
+                self._spin_for(60)
+
+                # Now that all queued stale messages have been processed, reset the
+                # flag so only NEW messages (from the just-launched simulation) count.
+                self.received_fresh_odom = False
+
+                # Wait for the robot to actually spawn in Gazebo by waiting for a
+                # fresh /odometry/filtered message from the new EKF session.
+                # Corridors/Mazes maps can take 600+ s to load in Docker so a fixed
+                # sleep is insufficient.  The odom topic only publishes once the robot
+                # entity exists in Gazebo and the EKF has received diff-drive/IMU data.
+                odom_wait_deadline = time.time() + 600.0
+                self.get_logger().info("Waiting for robot odometry (fresh /odometry/filtered)...")
+                while not self.received_fresh_odom and time.time() < odom_wait_deadline:
+                    rclpy.spin_once(self, timeout_sec=0.5)
+                if self.received_fresh_odom:
+                    self.get_logger().info("Robot odometry received. Proceeding to Nav2 activation.")
+                else:
+                    self.get_logger().warn(
+                        "Odometry did not appear within 600s — robot may not have spawned. "
+                        "Proceeding anyway.")
 
                 if not self.wait_nav2_active_with_timeout():
                     raise TimeoutError("nav2 active timeout")
@@ -541,9 +588,14 @@ class MasterBenchmarker(Node):
             except Exception as err:
                 self.get_logger().error(f"Map {row['world_file']} failed with exception: {err}")
             finally:
-                # Save one row per map, even if partially complete
-                final_results.append(row_data)
-                pd.DataFrame(final_results).to_csv(self.results_path, index=False, na_rep='NaN')
+                # Append one row per map immediately so partial results survive a crash.
+                # Append mode keeps any rows written by earlier runs (e.g. resumed run).
+                results_df = pd.DataFrame([row_data])
+                write_header = not os.path.exists(self.results_path)
+                results_df.to_csv(
+                    self.results_path, mode='a', header=write_header,
+                    index=False, na_rep='NaN'
+                )
 
                 # Cleanup Gazebo before next map
                 if process is not None:
