@@ -22,25 +22,24 @@ else
 fi
 source /navigation/install/setup.bash
 
-echo "=== [4/5] Setting up 9-map Rooms/Corridors/Mazes run ==="
+echo "=== [4/5] Setting up 6-map resume run (maps 3-6: Corridors + Mazes) ==="
 cd /Benchmarking_dataset
 
-echo "Using calibration_manifest.csv (9 maps: Rooms, Corridors, Mazes)"
-wc -l dataset/gazebo_worlds/calibration_manifest.csv
+echo "Existing CSV rows (should be 2 from Rooms run):"
+wc -l dataset/ann_real_world_targets.csv 2>/dev/null || echo "(no output file yet)"
 
-echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=3, all 9 maps from index 0) ==="
-rm -f dataset/ann_real_world_targets.csv
+echo "=== [5/5] Running benchmarker (RRT_ITERATIONS=3, START_MAP_INDEX=2, ODOM_WAIT_TIMEOUT_SEC=1200) ==="
 export RRT_ITERATIONS=3
 export SINGLE_RUN_TIMEOUT_SEC=600
 export NAV2_ACTIVE_TIMEOUT_SEC=600
-export ODOM_WAIT_TIMEOUT_SEC=1200   # Corridors maps have 1,700+ SDF links and need up to 700s to spawn
+export ODOM_WAIT_TIMEOUT_SEC=1200
 export MAX_SPAWN_RETRIES=1
-export START_MAP_INDEX=0
+export START_MAP_INDEX=2
 
 python3 master_benchmarker.py
 EXIT_CODE=$?
 
-echo "=== 9-map run finished (exit $EXIT_CODE) ==="
+echo "=== 6-map resume finished (exit $EXIT_CODE) ==="
 echo "=== CSV rows written: ==="
 wc -l dataset/ann_real_world_targets.csv 2>/dev/null || echo "(no output file)"
 echo "=== CSV output ==="
