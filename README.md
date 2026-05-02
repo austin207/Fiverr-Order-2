@@ -82,6 +82,14 @@ wc -l Benchmarking_dataset/dataset/ann_real_world_targets.csv
 tail -n 1 Benchmarking_dataset/dataset/ann_real_world_targets.csv
 ```
 
+### Stop the benchmark
+
+```bash
+docker rm -f benchmark_100map
+```
+
+The CSV is preserved — rows written so far are not lost. Resume from where it stopped with `bash resume_benchmark.sh` (see **Resuming a Partial Run** below).
+
 ### Expected runtimes
 
 | Map type | Gazebo spawn time | Per-map time (RRT×20) |
