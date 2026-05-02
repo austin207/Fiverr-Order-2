@@ -2,61 +2,25 @@
 
 Headless benchmark pipeline for three path-planning algorithms — **Dijkstra**, **A\***, and **RRT\*** — across procedurally generated Gazebo Ignition environments. Output is a structured CSV for training a machine learning model (ANN) to predict the best planner for a given map.
 
+The C++ planner plugins (`SmacMetricsPlanner2D` and `NavFnMetricsPlanner`) are already included in `navigation/src/robot_bringup/src/`. No external plugins need to be added.
+
 ---
 
-## Before You Begin — Add Your C++ Planner Plugins
+## Step 0 — Delete Old Build Artifacts (Required if re-running)
 
-> **This step is required before building the Docker image. Without the plugins, `Mem` and `PlanTime` will be 0.0 in all CSV rows.**
-
-The benchmarker reads memory usage and planning time from a ROS topic published by the C++ planner plugins. You must place your plugin source code into `navigation/src/` so it gets compiled when the Docker image builds.
-
-### What is required
-
-Two modified C++ Nav2 planner plugins that each publish a `std_msgs/msg/String` message on the `/planner_metrics` topic after every plan is computed, with this exact JSON payload:
-
-```json
-{"PlanTime": 0.084618, "Mem": 12}
-```
-
-| Field | Type | Unit |
-|-------|------|------|
-| `PlanTime` | float | seconds — time taken to compute the path |
-| `Mem` | float | KB — memory allocated during planning |
-
-### Plugins needed
-
-| Plugin | Nav2 planner name in YAML | Role |
-|--------|--------------------------|------|
-| Modified **SmacPlanner2D** | `GridBased` | Used for both Dijkstra (`use_astar: false`) and A\* (`use_astar: true`). Toggled at runtime via `/planner_server/set_parameters`. |
-| Modified **RRT\*** | `RRTStar` | Already provided in `navigation/src/TurtleBot-RRT-Star/`. Verify it publishes `/planner_metrics` as `std_msgs/msg/String` JSON. |
-
-### Where to place them
-
-```
-navigation/src/
-├── TurtleBot-RRT-Star/       ← already present (RRT* plugin)
-├── your_smac_plugin/         ← ADD: modified SmacPlanner2D that publishes /planner_metrics
-└── ... (other existing packages)
-```
-
-Copy your plugin source directory into `navigation/src/`. It must have a valid `package.xml` and `CMakeLists.txt` so `colcon build` picks it up automatically.
-
-### Verifying the plugin publishes correctly
-
-Inside the container (after build), confirm the topic type is correct:
+> **Do this before every fresh Docker run. Skipping it causes the container to use a stale compiled workspace that may be missing the C++ metrics plugins, giving `Mem = 0.0` and `PlanTime = 0.0` in all rows.**
 
 ```bash
-ros2 topic info /planner_metrics
-# Expected: Type: std_msgs/msg/String
+rm -rf navigation/build navigation/install navigation/log
 ```
 
-If the type is `std_msgs/msg/Float32MultiArray` — that is the old format and must be updated to JSON String.
+If this is your first time running from this zip, these directories won't exist — that's fine, skip this step.
 
 ---
 
 ## Step 1 — Build the Docker Image
 
-Run from the **repo root**. This only needs to be done once, or whenever the Dockerfile or your C++ plugin source changes.
+Run from the **repo root** (the folder containing this README). Only needs to be done once, or if the Dockerfile changes.
 
 ```bash
 docker build \
@@ -76,13 +40,13 @@ docker build \
 - Xvfb (virtual display for headless Gazebo rendering)
 - Python 3 + colcon build tools
 
-The image does **not** pre-build the ROS workspace — that happens inside the container on first launch via `colcon build`.
+The image does **not** pre-build the ROS workspace. The C++ plugins are compiled from source at container startup via `colcon build`.
 
 ---
 
-## Step 2 — Verify the Build (Smoke Test)
+## Step 2 — Smoke Test (Strongly Recommended)
 
-Run a single map to confirm the full pipeline works end-to-end before committing to a long run:
+Run one easy map to confirm the full pipeline works before committing to the 60–80 hour production run:
 
 ```bash
 docker run --rm \
@@ -97,11 +61,13 @@ docker run --rm \
 
 **Expected output:**
 - Three `Run result` lines — one each for `GridBased (A*)`, `GridBased` (Dijkstra), and `RRTStar`
-- `Cost`, `Turns`, and `BatteryDrain` should be non-zero
-- `Mem` and `PlanTime` should be non-zero if your C++ plugins are publishing correctly
+- `Cost`, `Turns`, and `BatteryDrain` are non-zero
+- `Mem` and `PlanTime` are **non-zero** (proves the C++ plugin compiled and is publishing)
 - Final line: `smoke test finished (exit 0)`
 
 **Runtime:** ~5 minutes.
+
+If `Mem` and `PlanTime` are 0.0, the C++ plugin did not compile. Check container logs for build errors. The most common cause is leftover `navigation/install/` from a previous run — go back to Step 0.
 
 ---
 
@@ -120,7 +86,7 @@ docker run -d \
   bash /run_100map.sh
 ```
 
-The container runs detached (`-d`). Output is streamed to Docker logs. The CSV is written **incrementally** — one row per completed map — so the run can be interrupted and resumed without data loss.
+The container runs detached (`-d`). The CSV is written **incrementally** — one row per completed map — so the run can be interrupted and resumed without data loss.
 
 ### Monitor progress
 
@@ -128,7 +94,7 @@ The container runs detached (`-d`). Output is streamed to Docker logs. The CSV i
 # Live tail of key events
 docker logs -f benchmark_100map 2>&1 | grep -E "Testing Map|Completed Map|Run result|spawn failure"
 
-# Count rows completed (header + data: subtract 1)
+# Count rows completed (subtract 1 for the header row)
 wc -l Benchmarking_dataset/dataset/ann_real_world_targets.csv
 
 # Preview the most recent completed row
@@ -171,7 +137,7 @@ wc -l Benchmarking_dataset/dataset/ann_real_world_targets.csv
 # "7 lines" = header + 6 data rows → 6 maps done → resume from index 6
 ```
 
-**2. Launch `run_100map_resume.sh`, passing `START_MAP_INDEX` as an environment variable:**
+**2. Launch with `run_100map_resume.sh`, passing `START_MAP_INDEX` as an environment variable:**
 
 ```bash
 docker run -d \
@@ -185,11 +151,11 @@ docker run -d \
   bash /run_100map_resume.sh
 ```
 
-Replace `-e START_MAP_INDEX=6` with your actual data row count. The script will error and exit immediately if `START_MAP_INDEX` is not set, so a misconfigured resume never silently overwrites data.
+Replace `-e START_MAP_INDEX=6` with your actual data row count. The script errors and exits immediately if `START_MAP_INDEX` is not set, so a misconfigured resume never silently overwrites data.
 
 The resume script does **not** clear the CSV — it appends from where you left off.
 
-> **Important:** Never use `run_100map.sh` or `run_9map.sh` to resume — both scripts delete the existing CSV before starting. Always use `run_100map_resume.sh` for production resumes.
+> **Important:** Never use `run_100map.sh` to resume — it deletes the existing CSV before starting. Always use `run_100map_resume.sh` for resumes.
 
 ---
 
@@ -231,8 +197,8 @@ RRT_Mem, RRT_Cost, RRT_PlanTime, RRT_ExecTime, RRT_Turns, RRT_Battery
 | `Cost` | Sum of Euclidean distances along `/plan` path | Lower = more direct path |
 | `Turns` | Direction changes > 0.5 rad on path | Lower = smoother path |
 | `Battery` | Integrated `abs(linear.x) × dt × 0.01` from `/cmd_vel` | Proxy for energy use |
-| `Mem` | `/planner_metrics` JSON key `"Mem"` | KB — requires C++ plugin (see Step 0) |
-| `PlanTime` | `/planner_metrics` JSON key `"PlanTime"` | Seconds — requires C++ plugin (see Step 0) |
+| `Mem` | `/planner_metrics` JSON key `"Mem"` | KB — from `SmacMetricsPlanner2D` C++ plugin |
+| `PlanTime` | `/planner_metrics` JSON key `"PlanTime"` | Seconds — from `SmacMetricsPlanner2D` C++ plugin |
 
 ---
 
@@ -255,6 +221,7 @@ Fiverr-Order-2/
 │       ├── ann_real_world_targets.csv     ← output dataset
 │       └── gazebo_worlds/
 │           ├── calibration_manifest.csv   ← active input manifest (100 maps)
+│           ├── smoke_manifest.csv         ← 1-map manifest for smoke test
 │           └── map_XXXX_TYPE_DIFF.sdf     ← Gazebo world files
 └── navigation/
     ├── .devcontainer/
@@ -262,6 +229,9 @@ Fiverr-Order-2/
     └── src/
         ├── robot_description/             ← Kina robot URDF/Xacro + STL meshes
         ├── robot_bringup/
+        │   ├── src/
+        │   │   ├── smac_metrics_planner_2d.cpp  ← SmacPlanner2D + /planner_metrics (primary)
+        │   │   └── navfn_metrics_planner.cpp    ← NavFn + /planner_metrics (reference)
         │   ├── config/
         │   │   ├── nav2_params_Dijkstra.yaml
         │   │   ├── nav2_params_A_star.yaml
@@ -269,7 +239,7 @@ Fiverr-Order-2/
         │   └── launch/
         │       └── robot_gazebo_launch.py
         ├── robot_control/
-        └── TurtleBot-RRT-Star/            ← C++ RRT* Nav2 planner plugin (provided)
+        └── TurtleBot-RRT-Star/            ← C++ RRT* Nav2 planner plugin
 ```
 
 ---
@@ -278,11 +248,19 @@ Fiverr-Order-2/
 
 **`Mem` and `PlanTime` are 0.0 across all rows**
 
-The C++ plugins are either not present in `navigation/src/`, were not compiled into the image, or are publishing `Float32MultiArray` instead of `std_msgs/msg/String` JSON. Rebuild the image after adding the correct plugin source and verifying the publish format.
+The C++ plugin was not compiled into the workspace. Most likely cause: a stale `navigation/install/` directory from a previous container run was reused. Delete it and re-run:
+```bash
+rm -rf navigation/build navigation/install navigation/log
+```
+Then repeat from Step 1.
+
+**Spawn failure warning on map 1 — "attempt 1/2"**
+
+This is normal. The first map in a fresh container takes longer to initialise (DDS discovery, Gazebo cold-start). The retry mechanism handles it automatically. Map 1 will complete on the second attempt.
 
 **Corridors or Mazes maps never spawn — repeated "robot did not spawn" messages**
 
-Corridors worlds have ~1,700 SDF links. Physics initialisation scales super-linearly with link count and takes 688–770 s on typical hardware. The default `ODOM_WAIT_TIMEOUT_SEC=1200` covers this. If you still see timeouts, increase to `1800` by editing the relevant run script.
+Corridors worlds have ~1,700 SDF links. Physics initialisation takes 688–770 s on typical hardware. The default `ODOM_WAIT_TIMEOUT_SEC=1200` covers this. If timeouts persist, increase to `1800` by editing the run script.
 
 **Container exits with non-zero code**
 
@@ -290,15 +268,15 @@ Corridors worlds have ~1,700 SDF links. Physics initialisation scales super-line
 docker logs benchmark_100map 2>&1 | tail -50
 ```
 
-The CSV up to the point of failure is preserved. Count completed rows and resume using `run_9map_resume.sh` with `START_MAP_INDEX` set to the row count (minus 1 for the header).
+The CSV up to the point of failure is preserved. Count completed rows and resume with `run_100map_resume.sh`.
 
 **Nav2 never activates — "waiting for Nav2 lifecycle" hangs**
 
-Increase `NAV2_ACTIVE_TIMEOUT_SEC` (default 600). On slower machines or with larger worlds, Nav2 lifecycle activation can take longer than usual.
+Increase `NAV2_ACTIVE_TIMEOUT_SEC` (default 600). On slower machines Nav2 lifecycle activation can take longer.
 
 **colcon build fails inside the container**
 
-The workspace is built on first launch. If it fails, the error will appear in the container logs. Common causes: missing `package.xml` in your plugin directory, missing `rosdep` dependency, or a C++ compile error in your plugin. Run the container interactively to debug:
+Run the container interactively to see the full error:
 
 ```bash
 docker run -it --rm \
@@ -311,3 +289,5 @@ source /opt/ros/humble/setup.bash
 cd /navigation
 colcon build --symlink-install
 ```
+
+Common causes: missing `package.xml`, missing `rosdep` dependency, or a C++ compile error in a plugin.
