@@ -171,28 +171,25 @@ wc -l Benchmarking_dataset/dataset/ann_real_world_targets.csv
 # "7 lines" = header + 6 data rows → 6 maps done → resume from index 6
 ```
 
-**2. Edit `run_9map_resume.sh`** and set `START_MAP_INDEX` to the next map number (the number of completed rows):
-
-```bash
-export START_MAP_INDEX=6   # ← change to your value
-```
-
-**3. Launch the resume container:**
+**2. Launch `run_100map_resume.sh`, passing `START_MAP_INDEX` as an environment variable:**
 
 ```bash
 docker run -d \
   --name benchmark_resume \
   --privileged \
+  -e START_MAP_INDEX=6 \
   -v "$(pwd)/navigation:/navigation" \
   -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" \
-  -v "$(pwd)/run_9map_resume.sh:/run_9map_resume.sh" \
+  -v "$(pwd)/run_100map_resume.sh:/run_100map_resume.sh" \
   ros2_benchmark:humble \
-  bash /run_9map_resume.sh
+  bash /run_100map_resume.sh
 ```
+
+Replace `-e START_MAP_INDEX=6` with your actual data row count. The script will error and exit immediately if `START_MAP_INDEX` is not set, so a misconfigured resume never silently overwrites data.
 
 The resume script does **not** clear the CSV — it appends from where you left off.
 
-> **Important:** Never use `run_100map.sh` or `run_9map.sh` to resume — both scripts delete the existing CSV before starting. Always use a resume script (`run_9map_resume.sh`, `run_6map_resume.sh`) that does not contain `rm -f dataset/ann_real_world_targets.csv`.
+> **Important:** Never use `run_100map.sh` or `run_9map.sh` to resume — both scripts delete the existing CSV before starting. Always use `run_100map_resume.sh` for production resumes.
 
 ---
 
@@ -207,6 +204,7 @@ The resume script does **not** clear the CSV — it appends from where you left 
 | `run_6map_resume.sh` | resumes from index 2 | 3 | **no** | Resume 6-map test after Rooms done |
 | `run_10map.sh` | 10 (mixed difficulty) | 3 | yes | Mixed-difficulty validation |
 | `run_100map.sh` | 100 (full) | 20 | **yes** | **Full production dataset** |
+| `run_100map_resume.sh` | 100 (resume from any index) | 20 | **no** | **Resume interrupted production run** |
 
 ---
 
@@ -243,7 +241,8 @@ RRT_Mem, RRT_Cost, RRT_PlanTime, RRT_ExecTime, RRT_Turns, RRT_Battery
 ```
 Fiverr-Order-2/
 ├── README.md
-├── run_100map.sh                          ← full 100-map production run
+├── run_100map.sh                          ← full 100-map production run (clears CSV)
+├── run_100map_resume.sh                   ← resume 100-map run from any index (safe)
 ├── run_9map.sh                            ← 9-map validation batch
 ├── run_9map_resume.sh                     ← resume from map 4 (Corridors+Mazes)
 ├── run_6map_resume.sh                     ← resume 6-map test from map 2
