@@ -266,7 +266,8 @@ planner_server:
     use_sim_time: True
     planner_plugins: ['GridBased', 'GridBasedAstar', 'RRTStar']
     GridBased:
-      plugin: 'nav2_smac_planner/SmacPlanner2D'
+      plugin: 'nav2_smac_metrics_planner/SmacMetricsPlanner2D'
+      use_astar: false
       tolerance: 3.0
       downsample_costmap: false
       downsampling_factor: 1
@@ -275,7 +276,7 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 10.0
       motion_model_for_search: "MOORE"
-      cost_travel_multiplier: 0.0
+      cost_travel_multiplier: 2.0
       use_final_approach_orientation: false
       smoother:
         max_iterations: 1000
@@ -285,7 +286,8 @@ planner_server:
         do_refinement: true
         refinement_num: 2
     GridBasedAstar:
-      plugin: 'nav2_smac_planner/SmacPlanner2D'
+      plugin: 'nav2_smac_metrics_planner/SmacMetricsPlanner2D'
+      use_astar: true
       tolerance: 3.0
       downsample_costmap: false
       downsampling_factor: 1

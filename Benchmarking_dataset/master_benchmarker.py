@@ -552,10 +552,8 @@ class MasterBenchmarker(Node):
                     # RUN 1: A* (A-STAR) — run first while Nav2 state is fresh
                     # ==========================================
                     self.get_logger().info("--- Running A* ---")
-                    self.toggle_astar_param(use_astar=True)
-                    res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
-                    self.toggle_astar_param(use_astar=False)
-                    self.get_logger().info(f"Run result for GridBased (A*): {res_a}")
+                    res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
+                    self.get_logger().info(f"Run result for GridBasedAstar (A*): {res_a}")
                     row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
                     self.reset_robot_to_start(spawn_x, spawn_y, world_name)
 
