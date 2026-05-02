@@ -15,11 +15,7 @@ source /opt/ros/humble/setup.bash
 
 echo "=== [3/5] Building navigation workspace ==="
 cd /navigation
-if [ -f "install/setup.bash" ]; then
-  echo "Install already exists — skipping rebuild to avoid permission conflicts on bind-mounted volume."
-else
-  colcon build --symlink-install 2>&1
-fi
+colcon build --symlink-install 2>&1
 source /navigation/install/setup.bash
 
 echo "=== [4/5] Setting up 2-map smoke test ==="

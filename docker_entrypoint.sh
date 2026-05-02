@@ -21,11 +21,7 @@ source /opt/ros/humble/setup.bash
 echo ">>> Building workspace at /ros2_ws"
 mkdir -p /ros2_ws
 cd /ros2_ws
-if [ -f "install/setup.bash" ]; then
-  echo ">>> Install already exists — skipping rebuild."
-else
-  colcon build --symlink-install
-fi
+colcon build --symlink-install
 source /ros2_ws/install/setup.bash
 
 # ── 4. Install required Python packages ─────────────────────────────────────
