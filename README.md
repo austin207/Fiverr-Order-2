@@ -23,10 +23,7 @@ If this is your first time running from this zip, these directories won't exist 
 Run from the **repo root** (the folder containing this README). Only needs to be done once, or if the Dockerfile changes.
 
 ```bash
-docker build \
-  -f navigation/.devcontainer/Dockerfile \
-  -t ros2_benchmark:humble \
-  navigation/.devcontainer/
+docker build -f navigation/.devcontainer/Dockerfile -t ros2_benchmark:humble navigation/.devcontainer/
 ```
 
 **Build time:** ~10–15 minutes on the first run. Subsequent builds are faster due to layer caching.
@@ -49,14 +46,7 @@ The image does **not** pre-build the ROS workspace. The C++ plugins are compiled
 Run one easy map to confirm the full pipeline works before committing to the 60–80 hour production run:
 
 ```bash
-docker run --rm \
-  --name benchmark_smoke \
-  --privileged \
-  -v "$(pwd)/navigation:/navigation" \
-  -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" \
-  -v "$(pwd)/smoke_run.sh:/smoke_run.sh" \
-  ros2_benchmark:humble \
-  bash /smoke_run.sh
+docker run --rm --name benchmark_smoke --privileged -v "$(pwd)/navigation:/navigation" -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" -v "$(pwd)/smoke_run.sh:/smoke_run.sh" ros2_benchmark:humble bash /smoke_run.sh
 ```
 
 **Expected output:**
@@ -76,14 +66,7 @@ If `Mem` and `PlanTime` are 0.0, the C++ plugin did not compile. Check container
 From the repo root:
 
 ```bash
-docker run -d \
-  --name benchmark_100map \
-  --privileged \
-  -v "$(pwd)/navigation:/navigation" \
-  -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" \
-  -v "$(pwd)/run_100map.sh:/run_100map.sh" \
-  ros2_benchmark:humble \
-  bash /run_100map.sh
+docker run -d --name benchmark_100map --privileged -v "$(pwd)/navigation:/navigation" -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" -v "$(pwd)/run_100map.sh:/run_100map.sh" ros2_benchmark:humble bash /run_100map.sh
 ```
 
 The container runs detached (`-d`). The CSV is written **incrementally** — one row per completed map — so the run can be interrupted and resumed without data loss.
@@ -140,15 +123,7 @@ wc -l Benchmarking_dataset/dataset/ann_real_world_targets.csv
 **2. Launch with `run_100map_resume.sh`, passing `START_MAP_INDEX` as an environment variable:**
 
 ```bash
-docker run -d \
-  --name benchmark_resume \
-  --privileged \
-  -e START_MAP_INDEX=6 \
-  -v "$(pwd)/navigation:/navigation" \
-  -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" \
-  -v "$(pwd)/run_100map_resume.sh:/run_100map_resume.sh" \
-  ros2_benchmark:humble \
-  bash /run_100map_resume.sh
+docker run -d --name benchmark_resume --privileged -e START_MAP_INDEX=6 -v "$(pwd)/navigation:/navigation" -v "$(pwd)/Benchmarking_dataset:/Benchmarking_dataset" -v "$(pwd)/run_100map_resume.sh:/run_100map_resume.sh" ros2_benchmark:humble bash /run_100map_resume.sh
 ```
 
 Replace `-e START_MAP_INDEX=6` with your actual data row count. The script errors and exits immediately if `START_MAP_INDEX` is not set, so a misconfigured resume never silently overwrites data.
@@ -279,12 +254,8 @@ Increase `NAV2_ACTIVE_TIMEOUT_SEC` (default 600). On slower machines Nav2 lifecy
 Run the container interactively to see the full error:
 
 ```bash
-docker run -it --rm \
-  --privileged \
-  -v "$(pwd)/navigation:/navigation" \
-  ros2_benchmark:humble \
-  bash
-# Inside:
+docker run -it --rm --privileged -v "$(pwd)/navigation:/navigation" ros2_benchmark:humble bash
+# Inside the container:
 source /opt/ros/humble/setup.bash
 cd /navigation
 colcon build --symlink-install
