@@ -1,0 +1,7 @@
+<library path="smac_metrics_planner_2d">
+  <class name="nav2_smac_metrics_planner/SmacMetricsPlanner2D"
+         type="nav2_smac_metrics_planner::SmacMetricsPlanner2D"
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>SmacPlanner2D wrapper that publishes PlanTime and Mem to /planner_metrics. Works in all map types including Corridors and Mazes.</description>
+  </class>
+</library>

@@ -3,7 +3,7 @@
 <package format="3">
   <name>robot_bringup</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>ROS 2 bringup package with launch files, Nav2 configs, and metrics planner plugins.</description>
   <maintainer email="sacheinn17@gmail.com">sac</maintainer>
   <license>TODO: License declaration</license>
 
@@ -16,6 +16,19 @@
   <depend>teleop_tools</depend>
   <depend>navigation2</depend>
   <depend>slam_toolbox</depend>
+
+  <!-- C++ plugin dependencies -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>nav2_navfn_planner</depend>
+  <depend>nav2_smac_planner</depend>
+  <depend>nav2_core</depend>
+  <depend>pluginlib</depend>
+  <depend>std_msgs</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>tf2_ros</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

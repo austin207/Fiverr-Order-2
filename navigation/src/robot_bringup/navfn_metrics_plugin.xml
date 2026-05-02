@@ -1,0 +1,7 @@
+<library path="navfn_metrics_planner">
+  <class name="nav2_navfn_metrics_planner/NavFnMetricsPlanner" 
+         type="nav2_navfn_metrics_planner::NavFnMetricsPlanner" 
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>NavFn metrics wrapper.</description>
+  </class>
+</library>
