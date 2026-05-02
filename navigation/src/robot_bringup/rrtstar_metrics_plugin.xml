@@ -1,0 +1,7 @@
+<library path="rrtstar_metrics_planner">
+  <class name="nav2_rrtstar_metrics_planner/RRTStarMetricsPlanner"
+         type="nav2_rrtstar_metrics_planner::RRTStarMetricsPlanner"
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>RRTStar wrapper that publishes PlanTime and Mem to /planner_metrics</description>
+  </class>
+</library>

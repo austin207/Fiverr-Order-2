@@ -9,7 +9,7 @@ install(
   DIRECTORY launch config worlds
   DESTINATION share/${PROJECT_NAME}/
 )
-install(FILES navfn_metrics_plugin.xml smac_metrics_plugin.xml
+install(FILES navfn_metrics_plugin.xml smac_metrics_plugin.xml rrtstar_metrics_plugin.xml
   DESTINATION share/${PROJECT_NAME}/
 )
 
@@ -19,6 +19,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(nav2_core REQUIRED)
 find_package(nav2_navfn_planner REQUIRED)
 find_package(nav2_smac_planner REQUIRED)
+find_package(nav2_rrtstar_planner REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -51,6 +52,21 @@ ament_target_dependencies(smac_metrics_planner_2d
 )
 pluginlib_export_plugin_description_file(nav2_core smac_metrics_plugin.xml)
 install(TARGETS smac_metrics_planner_2d
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# ── RRTStar Metrics Wrapper Plugin ───────────────────────────────────────────
+add_library(rrtstar_metrics_planner SHARED
+  src/rrtstar_metrics_planner.cpp
+)
+ament_target_dependencies(rrtstar_metrics_planner
+  rclcpp rclcpp_lifecycle nav2_core nav2_rrtstar_planner
+  nav2_costmap_2d pluginlib std_msgs geometry_msgs nav_msgs tf2_ros
+)
+pluginlib_export_plugin_description_file(nav2_core rrtstar_metrics_plugin.xml)
+install(TARGETS rrtstar_metrics_planner
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin

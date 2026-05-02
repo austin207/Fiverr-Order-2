@@ -306,7 +306,7 @@ planner_server:
         do_refinement: true
         refinement_num: 2
     RRTStar:
-      plugin: 'nav2_rrtstar_planner/RRTStar'
+      plugin: 'nav2_rrtstar_metrics_planner/RRTStarMetricsPlanner'
       max_iterations: 10000
       interpolation_resolution: 0.05
       goal_tolerance: 0.5
