@@ -35,6 +35,8 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import String as StringMsg
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 import json
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
@@ -205,6 +207,26 @@ class MasterBenchmarker(Node):
         self.get_logger().info(
             f"[TF-CORRECT] static map→odom = ({correction_x:.3f}, {correction_y:.3f}) "
             f"[robot_odom=({odom_x:.3f}, {odom_y:.3f})]")
+
+    def toggle_astar_param(self, use_astar: bool):
+        """Set GridBased.use_astar on the running planner_server via its set_parameters service."""
+        client = self.create_client(SetParameters, '/planner_server/set_parameters')
+        if not client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn("planner_server/set_parameters not available — cannot toggle use_astar")
+            self.destroy_client(client)
+            return
+        req = SetParameters.Request()
+        p = Parameter()
+        p.name = 'GridBased.use_astar'
+        p.value = ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=use_astar)
+        req.parameters = [p]
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        if future.result() is not None:
+            self.get_logger().info(f"Set GridBased.use_astar={use_astar}")
+        else:
+            self.get_logger().warn(f"Failed to set GridBased.use_astar={use_astar}")
+        self.destroy_client(client)
 
     def reset_robot_to_start(self, spawn_x, spawn_y, world_name):
         """Teleport robot in Gazebo, then correct map→odom so MPPI finds the path."""
@@ -530,8 +552,10 @@ class MasterBenchmarker(Node):
                     # RUN 1: A* (A-STAR) — run first while Nav2 state is fresh
                     # ==========================================
                     self.get_logger().info("--- Running A* ---")
-                    res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBasedAstar")
-                    self.get_logger().info(f"Run result for GridBasedAstar: {res_a}")
+                    self.toggle_astar_param(use_astar=True)
+                    res_a = self.execute_single_run(spawn_x, spawn_y, make_goal_pose(), planner_id="GridBased")
+                    self.toggle_astar_param(use_astar=False)
+                    self.get_logger().info(f"Run result for GridBased (A*): {res_a}")
                     row_data.update({"A_Mem": res_a["Mem"], "A_Cost": res_a["Cost"], "A_PlanTime": res_a["PlanTime"], "A_ExecTime": res_a["ExecTime"], "A_Turns": res_a["Turns"], "A_Battery": res_a["BatteryDrain"]})
                     self.reset_robot_to_start(spawn_x, spawn_y, world_name)
 
